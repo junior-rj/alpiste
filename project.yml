@@ -1,0 +1,39 @@
+name: Alpiste
+options:
+  bundleIdPrefix: com.sparrow
+  deploymentTarget:
+    # 15.0 is the floor for SCStreamConfiguration.captureMicrophone
+    macOS: "15.0"
+  xcodeVersion: "16.0"
+  createIntermediateGroups: true
+  defaultConfig: Debug
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: "Q9KN4S5XHY"
+
+targets:
+  Alpiste:
+    type: application
+    platform: macOS
+    sources:
+      - path: Alpiste
+        excludes:
+          - "**/.DS_Store"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.sparrow.alpiste
+        GENERATE_INFOPLIST_FILE: true
+        # ponytail: sem sandbox = uso proprio via Developer ID, precisa shell out pra ffmpeg/whisper-cli
+        ENABLE_APP_SANDBOX: "NO"
+        ENABLE_HARDENED_RUNTIME: "YES"
+        CODE_SIGN_ENTITLEMENTS: Alpiste/Alpiste.entitlements
+        # menu bar only: sem icone no Dock
+        INFOPLIST_KEY_LSUIElement: true
+        INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.productivity"
+        INFOPLIST_KEY_NSHumanReadableCopyright: ""
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: "Alpiste records your microphone alongside the meeting audio so the transcript includes your side of the conversation."

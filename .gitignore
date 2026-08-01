@@ -1,0 +1,7 @@
+.DS_Store
+.env
+
+# XcodeGen owns the project; project.yml is the source of truth
+*.xcodeproj
+build/
+DerivedData/
