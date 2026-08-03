@@ -219,6 +219,13 @@ enum SelfTest {
         expect(degraded.contains("raw text"), "markdown: keeps the transcript when notes fail")
         expect(degraded.contains("Gemini exploded"), "markdown: surfaces the problem")
 
+        // A silent participant and a dead mic produce identical audio, so the file has to
+        // say which sources were captured.
+        let oneSource = Notes.markdown(title: "t", notes: nil, transcript: "x",
+                                       audioFile: "a.m4a", sources: "system audio", problems: [])
+        expect(oneSource.contains("system audio"), "markdown: names the captured sources")
+        expect(!oneSource.contains("microphone"), "markdown: omits sources that were absent")
+
         expect(Notes.stamp(Date(timeIntervalSince1970: 0)).count == 15, "stamp: YYYY-MM-DD-HHMM")
 
         expect(Tool.find("ffmpeg") != nil, "tools: ffmpeg found without a login PATH")
@@ -253,6 +260,10 @@ enum SelfTest {
                     }
                     expect(size(mixed.m4a) > 0, "mix/\(label): produced a non-empty m4a")
                     expect(size(mixed.wav16k) > 0, "mix/\(label): produced a non-empty 16k wav")
+                    // ponytail: no clipping assertion here. Synthetic tones don't reach
+                    // 0 dBFS through amix, so the check passed with and without the
+                    // limiter: a test that cannot fail is worse than none. Verifying the
+                    // limiter needs a real hot recording, not lavfi.
                 } catch {
                     expect(false, "mix/\(label): \(error.localizedDescription)")
                 }

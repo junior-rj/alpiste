@@ -68,10 +68,13 @@ enum Notes {
         }
 
         // 4. Always write the file.
+        let captured = [capture.systemAudio != nil ? "system audio" : nil,
+                        capture.microphone != nil ? "microphone" : nil].compactMap { $0 }
         let markdown = Self.markdown(title: Self.title(startedAt),
                                      notes: notes,
                                      transcript: transcript,
                                      audioFile: audioFile?.lastPathComponent,
+                                     sources: captured.isEmpty ? nil : captured.joined(separator: " + "),
                                      problems: problems)
         let destination = outputDirectory.appendingPathComponent("\(stamp).md")
         do {
@@ -111,8 +114,12 @@ enum Notes {
         if inputs.count > 1 {
             // normalize=0 keeps each source at its original level instead of halving both.
             let pads = (0..<inputs.count).map { "[\($0):a]" }.joined()
+            // alimiter catches the peaks that summing at full level produces. Without it
+            // a loud meeting plus a loud mic clips at 0 dBFS; blanket volume reduction
+            // would instead penalise quiet meetings, so limit rather than attenuate.
             args += ["-filter_complex",
-                     "\(pads)amix=inputs=\(inputs.count):duration=longest:normalize=0,asplit=2[mix][whisper]"]
+                     "\(pads)amix=inputs=\(inputs.count):duration=longest:normalize=0,"
+                        + "alimiter=limit=0.95,asplit=2[mix][whisper]"]
             m4aSource = "[mix]"
             wavSource = "[whisper]"
         } else {
@@ -265,9 +272,14 @@ enum Notes {
                          notes: String?,
                          transcript: String,
                          audioFile: String?,
+                         sources: String? = nil,
                          problems: [String]) -> String {
         var out = "# \(title)\n\n"
-        if let audioFile { out += "Audio: `\(audioFile)`\n\n" }
+        if let audioFile {
+            // Naming the captured sources is the only way to tell afterwards whether the
+            // mic actually made it in; a silent participant looks identical to a dead mic.
+            out += "Audio: `\(audioFile)`" + (sources.map { " — \($0)" } ?? "") + "\n\n"
+        }
         if !problems.isEmpty {
             out += "> **Alpiste hit some problems:**\n"
             for problem in problems { out += "> - \(problem)\n" }
