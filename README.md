@@ -90,6 +90,29 @@ whisper-cli -m ~/Library/Application\ Support/Alpiste/models/ggml-medium.bin \
             -f $(brew --prefix)/share/whisper-cpp/jfk.wav
 ```
 
+## Release
+
+```sh
+./scripts/release.sh
+```
+
+Regenerates the icon, archives, signs with Developer ID, packages a DMG, notarizes it with
+Apple, and staples the ticket. Output lands in `build/Alpiste.dmg`. Uses the
+`yourlaunch-notary` keychain profile; override with `NOTARY_PROFILE=...`.
+
+## The icon
+
+`scripts/make-icon.py` draws it with Pillow and writes the whole `AppIcon.appiconset`.
+No design tool and no external renderer involved, so the icon is reproducible from source:
+
+```sh
+python3 scripts/make-icon.py
+```
+
+Birdseed grains whose heights trace an audio waveform, in the Sparrow palette (navy tile,
+sand grains, ivory crest). Five grains rather than seven because seven collapse into
+hairlines once macOS scales the icon to 32px.
+
 ## Notes on the build
 
 - `project.yml` is the source of truth. Run `xcodegen` after changing it; the `.xcodeproj`

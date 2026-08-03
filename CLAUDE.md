@@ -27,6 +27,8 @@ Produto próprio
 - Alpiste/Notes.swift — mix ffmpeg, whisper, Gemini, escrita do markdown; `Tool` e `Env`
 - Alpiste/AlpisteApp.swift — MenuBarExtra, máquina de estados, permissões, `SelfTest`
 - scripts/setup.sh — brew deps + download do ggml-medium.bin + ~/.alpiste/.env
+- scripts/make-icon.py — gera o AppIcon (grãos-onda) com Pillow, sem dependência externa
+- scripts/release.sh — DMG assinado (Developer ID) e notarizado, perfil yourlaunch-notary
 
 ## Regras específicas
 - O ScreenCaptureKit NÃO mistura mic com áudio do sistema: chegam em output types e formatos
