@@ -250,8 +250,7 @@ enum Notes {
             "contents": [["parts": [["text": "\(prompt)\n\n\(transcript)"]]]]
         ])
 
-        let (data, response) = try await URLSession.shared.data(for: request)
-        try Self.checkHTTP(response, data)
+        let data = try await Self.fetchWithRetry(request)
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let candidates = json["candidates"] as? [[String: Any]],
               let content = candidates.first?["content"] as? [String: Any],
@@ -291,6 +290,36 @@ enum Notes {
         return out
     }
 
+    /// Pure: pulls the reusable parts back out of a written note file so the summary
+    /// can be regenerated. Returns the title and audio lines verbatim plus the
+    /// transcript; the problems blockquote and the no-notes placeholder are exactly
+    /// what regeneration replaces, so they are dropped. Covered by `--selftest`.
+    static func split(markdown: String) -> (header: String, transcript: String)? {
+        let divider = "\n---\n\n## Transcript\n\n"
+        guard let range = markdown.range(of: divider) else { return nil }
+        let transcript = String(markdown[range.upperBound...])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !transcript.isEmpty, transcript != "_No transcript was produced._" else { return nil }
+        let kept = markdown[..<range.lowerBound].split(separator: "\n").filter {
+            $0.hasPrefix("# ") || $0.hasPrefix("Audio: ")
+        }
+        guard kept.first?.hasPrefix("# ") == true else { return nil }
+        return (kept.joined(separator: "\n\n"), transcript)
+    }
+
+    /// Re-runs summarization on an already-written note file, in place. Backs
+    /// `--regenerate`, the recovery path for when the LLM was down at recording time.
+    static func regenerate(file: URL) async throws {
+        let contents = try String(contentsOf: file, encoding: .utf8)
+        guard let parts = split(markdown: contents) else {
+            throw Failure.badResponse("\(file.lastPathComponent) has no transcript to summarize")
+        }
+        let notes = try await summarize(parts.transcript)
+        let rebuilt = parts.header + "\n\n" + notes + "\n\n---\n\n## Transcript\n\n"
+            + parts.transcript + "\n"
+        try rebuilt.write(to: file, atomically: true, encoding: .utf8)
+    }
+
     static func stamp(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd-HHmm"
@@ -306,7 +335,32 @@ enum Notes {
     private static func checkHTTP(_ response: URLResponse, _ data: Data) throws {
         guard let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) else { return }
         let body = String(data: data.prefix(400), encoding: .utf8) ?? ""
-        throw Failure.badResponse("HTTP \(http.statusCode): \(body)")
+        throw Failure.http(http.statusCode, body)
+    }
+
+    /// Free-tier Gemini throws transient 503s under load, so spaced retries
+    /// (2s/4s/8s) usually ride the spike out. Non-transient errors propagate at once.
+    private static func fetchWithRetry(_ request: URLRequest, attempts: Int = 4) async throws -> Data {
+        for attempt in 1... {
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                try checkHTTP(response, data)
+                return data
+            } catch where attempt < attempts && isTransient(error) {
+                try await Task.sleep(for: .seconds(1 << attempt))
+            }
+        }
+        fatalError("unreachable: the loop either returns or throws")
+    }
+
+    private static func isTransient(_ error: Error) -> Bool {
+        if case Failure.http(let status, _) = error {
+            return [429, 500, 502, 503, 504].contains(status)
+        }
+        if let urlError = error as? URLError {
+            return [.timedOut, .networkConnectionLost, .cannotConnectToHost].contains(urlError.code)
+        }
+        return false
     }
 
     enum Failure: LocalizedError {
@@ -316,6 +370,7 @@ enum Notes {
         case noLLMKey
         case commandFailed(String, Int32, String)
         case badResponse(String)
+        case http(Int, String)
 
         var errorDescription: String? {
             switch self {
@@ -331,6 +386,8 @@ enum Notes {
                 "\(name) exited with code \(code). \(log)"
             case .badResponse(let detail):
                 detail
+            case .http(let status, let body):
+                "HTTP \(status): \(body)"
             }
         }
     }

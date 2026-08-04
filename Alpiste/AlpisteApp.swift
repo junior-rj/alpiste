@@ -8,6 +8,32 @@ struct AlpisteApp: App {
     init() {
         // Handled before the UI comes up so `Alpiste --selftest` works from a terminal.
         if CommandLine.arguments.contains("--selftest") { SelfTest.run() }
+        if let flag = CommandLine.arguments.firstIndex(of: "--regenerate") {
+            Self.regenerate(CommandLine.arguments.dropFirst(flag + 1).first)
+        }
+    }
+
+    /// `Alpiste --regenerate <file.md>`: re-summarizes a saved note in place, the
+    /// recovery path for when the LLM was down at recording time. Parks the main
+    /// thread on purpose: the work must finish and exit before the UI comes up, and
+    /// the detached task never needs the thread this blocks.
+    private static func regenerate(_ path: String?) -> Never {
+        guard let path else {
+            print("usage: Alpiste --regenerate <file.md>")
+            exit(2)
+        }
+        let file = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+        Task.detached {
+            do {
+                try await Notes.regenerate(file: file)
+                print("ok   rewrote \(file.lastPathComponent)")
+                exit(0)
+            } catch {
+                print("FAIL \(error.localizedDescription)")
+                exit(1)
+            }
+        }
+        dispatchMain()
     }
 
     var body: some Scene {
@@ -225,6 +251,30 @@ enum SelfTest {
                                        audioFile: "a.m4a", sources: "system audio", problems: [])
         expect(oneSource.contains("system audio"), "markdown: names the captured sources")
         expect(!oneSource.contains("microphone"), "markdown: omits sources that were absent")
+
+        // Regeneration: a degraded file must yield its transcript back, minus the
+        // failure noise, so `--regenerate` can rebuild it.
+        let failed = Notes.markdown(title: "t", notes: nil, transcript: "raw text",
+                                    audioFile: "a.m4a", sources: "system audio",
+                                    problems: ["HTTP 503: overloaded"])
+        if let parts = Notes.split(markdown: failed) {
+            expect(parts.transcript == "raw text", "split: recovers the transcript")
+            expect(parts.header.contains("a.m4a"), "split: keeps the audio line")
+            expect(!parts.header.contains("HTTP 503"), "split: drops the problems block")
+            expect(!parts.header.contains("No notes were generated"), "split: drops the placeholder")
+        } else {
+            expect(false, "split: parses a degraded note file")
+        }
+        let healthy = Notes.markdown(title: "t", notes: "## Summary\n- p",
+                                     transcript: "raw text", audioFile: "a.m4a", problems: [])
+        if let parts = Notes.split(markdown: healthy) {
+            let rebuilt = parts.header + "\n\n## Summary\n- p\n\n---\n\n## Transcript\n\n"
+                + parts.transcript + "\n"
+            expect(rebuilt == healthy, "split: round-trips a healthy note file")
+        } else {
+            expect(false, "split: parses a healthy note file")
+        }
+        expect(Notes.split(markdown: "# no divider") == nil, "split: nil without a divider")
 
         expect(Notes.stamp(Date(timeIntervalSince1970: 0)).count == 15, "stamp: YYYY-MM-DD-HHMM")
 
