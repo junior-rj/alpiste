@@ -54,3 +54,5 @@ Produto próprio
 - `Tool.run` é assíncrono e tem timeout (default 30 min, whisper usa 4h): nunca bloqueia o
   cooperative pool do Swift Concurrency, e um processo pendurado não trava o pipeline pra sempre
 - Check único: `Alpiste.app/Contents/MacOS/Alpiste --selftest` (assíncrono; roda ffmpeg de verdade no mixer)
+- "About Alpiste" no menu chama o painel nativo do macOS (`NSApp.orderFrontStandardAboutPanel`), que lê
+  nome/versão/copyright direto do Info.plist. Sem tela custom
