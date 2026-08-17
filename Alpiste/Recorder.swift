@@ -43,16 +43,22 @@ enum Recorder {
         await AVCaptureDevice.requestAccess(for: .audio)
     }
 
-    /// Starts capturing. Call `stop()` on the returned session to finish.
-    static func start() async throws -> Session {
+    /// Starts capturing. Call `stop()` on the returned session to finish. `onStreamError`
+    /// fires if SCK stops the stream on its own mid-meeting (display disconnected,
+    /// permission revoked, sleep/wake) so the caller can salvage whatever was captured
+    /// instead of leaving the UI showing "Recording" forever.
+    static func start(onStreamError: @escaping @Sendable (Error) -> Void) async throws -> Session {
         guard hasScreenPermission() else { throw Failure.screenRecordingDenied }
 
         let content = try await SCShareableContent.excludingDesktopWindows(
             false, onScreenWindowsOnly: false)
         guard let display = content.displays.first else { throw Failure.noDisplay }
 
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("alpiste-\(UUID().uuidString)", isDirectory: true)
+        // Application Support rather than the temp directory: a multi-hour meeting can
+        // reach several GB, and macOS is free to purge temporaryDirectory under disk
+        // pressure, which is exactly when a large in-progress recording is most at risk.
+        let directory = Notes.supportDirectory
+            .appendingPathComponent("captures/alpiste-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
         let config = SCStreamConfiguration()
@@ -71,7 +77,7 @@ enum Recorder {
         config.queueDepth = 6
 
         let filter = SCContentFilter(display: display, excludingWindows: [])
-        let tap = AudioTap(directory: directory)
+        let tap = AudioTap(directory: directory, onStop: onStreamError)
         let stream = SCStream(filter: filter, configuration: config, delegate: tap)
 
         let queue = DispatchQueue(label: "com.sparrow.alpiste.audio")
@@ -107,9 +113,11 @@ final class AudioTap: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
     private let lock = NSLock()
     private var writers: [SCStreamOutputType: AVAudioFile] = [:]
     private var stopped = false
+    private let onStop: @Sendable (Error) -> Void
 
-    init(directory: URL) {
+    init(directory: URL, onStop: @escaping @Sendable (Error) -> Void) {
         self.directory = directory
+        self.onStop = onStop
         super.init()
     }
 
@@ -166,6 +174,12 @@ final class AudioTap: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         NSLog("alpiste: stream stopped with error: \(error)")
+        lock.lock()
+        let alreadyStopped = stopped
+        lock.unlock()
+        // A stop the user asked for already tore this down; only a stream that died
+        // on its own needs to be reported upward.
+        if !alreadyStopped { onStop(error) }
     }
 
     /// Closes the files and reports which ones actually received audio.

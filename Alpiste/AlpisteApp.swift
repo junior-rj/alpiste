@@ -3,7 +3,8 @@ import SwiftUI
 
 @main
 struct AlpisteApp: App {
-    @State private var state = AppState()
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    @State private var state = AppState.shared
 
     init() {
         // Handled before the UI comes up so `Alpiste --selftest` works from a terminal.
@@ -86,9 +87,15 @@ final class AppState {
         case failed(String)
     }
 
+    static let shared = AppState()
+
     private(set) var phase: Phase = .idle
     private(set) var elapsed = "0:00"
     private(set) var lastNote: URL?
+    /// Set by `AppDelegate` when quit arrives mid-recording/processing: suppresses
+    /// modal alerts (which would block the reply) and replies to AppKit once the
+    /// pipeline finishes saving.
+    var pendingTermination = false
 
     private var session: Recorder.Session?
     private var startedAt: Date?
@@ -110,9 +117,16 @@ final class AppState {
     // MARK: - Recording
 
     func start() {
+        // Set synchronously, before any `await`, so a second click landing before the
+        // first `Task` resumes sees `isBusy` and bails instead of starting a second
+        // stream that the first session's cleanup would never stop.
+        guard !isRecording, !isBusy else { return }
+        phase = .working("Starting…")
+
         Task {
             guard Recorder.hasScreenPermission() else {
                 Recorder.requestScreenPermission()
+                phase = .idle
                 alert("Screen Recording permission needed",
                       "Alpiste needs Screen Recording to capture the meeting's audio.\n\n"
                         + "Enable it in System Settings > Privacy & Security > Screen Recording, "
@@ -128,7 +142,9 @@ final class AppState {
 
             do {
                 let started = Date()
-                session = try await Recorder.start()
+                session = try await Recorder.start { [weak self] error in
+                    Task { @MainActor in self?.streamFailed(error) }
+                }
                 startedAt = started
                 phase = .recording
                 startTicking(from: started)
@@ -137,6 +153,17 @@ final class AppState {
                 alert("Could not start recording", error.localizedDescription)
             }
         }
+    }
+
+    /// SCK stopped the stream on its own (display disconnected, permission revoked,
+    /// sleep/wake). Save whatever was captured instead of leaving the UI stuck on
+    /// "Recording" with nothing further ever being written.
+    private func streamFailed(_ error: Error) {
+        guard isRecording, session != nil else { return }  // a user-initiated stop already tore this down
+        alert("Recording interrupted",
+              "The capture stream stopped (\(error.localizedDescription)). "
+                + "Saving what was recorded so far.")
+        stop()
     }
 
     func stop() {
@@ -167,6 +194,8 @@ final class AppState {
                 phase = .failed(message)
                 alert("Could not save notes", message)
             }
+
+            if pendingTermination { NSApp.reply(toApplicationShouldTerminate: true) }
         }
     }
 
@@ -191,6 +220,12 @@ final class AppState {
     }
 
     private func alert(_ title: String, _ message: String) {
+        // A modal here while AppKit is waiting on applicationShouldTerminate would
+        // block the reply that lets the app actually quit; log instead.
+        guard !pendingTermination else {
+            NSLog("alpiste: \(title) — \(message)")
+            return
+        }
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = message
@@ -200,10 +235,43 @@ final class AppState {
     }
 }
 
+/// Keeps a recording (and the notes pipeline that follows it) from being cut off by
+/// Cmd-Q: `applicationShouldTerminate` defers the quit and lets `AppState` finish
+/// saving before AppKit is allowed to tear the app down.
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let state = AppState.shared
+        switch state.phase {
+        case .recording:
+            state.pendingTermination = true
+            state.stop()
+            return .terminateLater
+        case .working:
+            state.pendingTermination = true
+            return .terminateLater
+        default:
+            return .terminateNow
+        }
+    }
+}
+
 /// The one runnable check: asserts the pure logic that the rest of the app depends on.
 /// Run with `Alpiste.app/Contents/MacOS/Alpiste --selftest`.
 enum SelfTest {
+    /// Parks the main thread on purpose: `checks()` runs real ffmpeg processes through
+    /// the async `Tool.run`, so the check needs its own task; nothing after this needs
+    /// the thread it blocks.
     static func run() -> Never {
+        Task.detached {
+            let failures = await checks()
+            print(failures.isEmpty ? "\nPASS" : "\nFAIL (\(failures.count))")
+            exit(failures.isEmpty ? 0 : 1)
+        }
+        dispatchMain()
+    }
+
+    private static func checks() async -> [String] {
         var failures: [String] = []
         func expect(_ condition: Bool, _ what: String) {
             if !condition { failures.append(what) }
@@ -277,6 +345,15 @@ enum SelfTest {
         expect(Notes.split(markdown: "# no divider") == nil, "split: nil without a divider")
 
         expect(Notes.stamp(Date(timeIntervalSince1970: 0)).count == 15, "stamp: YYYY-MM-DD-HHMM")
+        // Guards against a non-Gregorian system calendar (Japanese, Buddhist, ...)
+        // silently turning "yyyy" into an era year and breaking the filename format.
+        expect(Notes.stamp(Date(timeIntervalSince1970: 0)).allSatisfy { "0123456789-".contains($0) },
+               "stamp: digits and dashes regardless of system calendar")
+
+        expect(Notes.uniqueStem("x") { $0 == "x" || $0 == "x-2" } == "x-3",
+               "uniqueStem: skips names that are already taken")
+        expect(Notes.uniqueStem("y") { _ in false } == "y",
+               "uniqueStem: keeps an untaken name as-is")
 
         expect(Tool.find("ffmpeg") != nil, "tools: ffmpeg found without a login PATH")
 
@@ -284,7 +361,7 @@ enum SelfTest {
         // only restate assumptions; the real failure here was ffmpeg refusing a two-output
         // filtergraph, which nothing but a real invocation catches.
         if let ffmpeg = Tool.find("ffmpeg") {
-            func mixCheck(_ label: String, sources: Int) {
+            func mixCheck(_ label: String, sources: Int) async {
                 let dir = FileManager.default.temporaryDirectory
                     .appendingPathComponent("alpiste-selftest-\(UUID().uuidString)")
                 defer { try? FileManager.default.removeItem(at: dir) }
@@ -295,16 +372,16 @@ enum SelfTest {
                 var made: [URL] = []
                 for (name, tone) in tones.sorted(by: { $0.key < $1.key }).prefix(sources) {
                     let url = dir.appendingPathComponent(name)
-                    try? Tool.run(ffmpeg, ["-y", "-nostdin", "-f", "lavfi", "-i", tone,
-                                           "-c:a", "pcm_f32le", url.path],
-                                  in: dir, label: "gen")
+                    try? await Tool.run(ffmpeg, ["-y", "-nostdin", "-f", "lavfi", "-i", tone,
+                                                 "-c:a", "pcm_f32le", url.path],
+                                        in: dir, label: "gen")
                     made.append(url)
                 }
                 let capture = Recorder.Capture(directory: dir,
                                                systemAudio: made.first { $0.lastPathComponent == "system.caf" },
                                                microphone: made.first { $0.lastPathComponent == "mic.caf" })
                 do {
-                    let mixed = try Notes.mix(capture)
+                    let mixed = try await Notes.mix(capture)
                     func size(_ url: URL) -> Int {
                         (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
                     }
@@ -318,15 +395,14 @@ enum SelfTest {
                     expect(false, "mix/\(label): \(error.localizedDescription)")
                 }
             }
-            mixCheck("system only", sources: 1)
-            mixCheck("system + mic", sources: 2)
+            await mixCheck("system only", sources: 1)
+            await mixCheck("system + mic", sources: 2)
         }
         let whisper = Tool.find("whisper-cli") != nil
         print("\(whisper ? "ok  " : "note") tools: whisper-cli \(whisper ? "found" : "missing, run scripts/setup.sh")")
         let model = FileManager.default.fileExists(atPath: Notes.modelURL.path)
         print("\(model ? "ok  " : "note") model: ggml-medium.bin \(model ? "present" : "missing, run scripts/setup.sh")")
 
-        print(failures.isEmpty ? "\nPASS" : "\nFAIL (\(failures.count))")
-        exit(failures.isEmpty ? 0 : 1)
+        return failures
     }
 }
