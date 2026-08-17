@@ -13,7 +13,14 @@ the transcript into notes, and even that is optional.
 3. Transcribes with a local whisper.cpp `medium` model.
 4. Sends the transcript to Gemini for a 5-bullet summary, decisions, and action items.
 5. Writes `~/MeetingNotes/YYYY-MM-DD-HHMM.md` with the notes on top, the full transcript
-   below a divider, and the audio alongside as `YYYY-MM-DD-HHMM.m4a`.
+   below a divider, and the audio alongside as `YYYY-MM-DD-HHMM.m4a`. The audio line also
+   names which sources actually got captured (`system audio`, `microphone`, or both), and
+   two recordings started in the same minute get `-2`, `-3`... appended instead of
+   overwriting each other.
+
+While a recording is in progress, its raw files live in
+`~/Library/Application Support/Alpiste/captures/`, not in the system temp directory, so a
+multi-hour meeting survives disk pressure.
 
 ## Install
 
@@ -68,11 +75,25 @@ With `ggml-medium.bin` in place, transcription never touches the network. Leave
 `GEMINI_API_KEY` empty (or just stay offline) and you still get a complete file with the
 full transcript; it simply notes that no summary was generated.
 
-The local model always wins. The Whisper API is a fallback for when the model file is
-missing, not a preference.
+The local model always wins, but only while it keeps working: if whisper-cli crashes or
+the model file is corrupt, transcription falls back to the API the same as if the model
+were missing, rather than losing the transcript.
 
 If a step fails, the meeting is still saved. The markdown gets written with whatever
-succeeded plus a note about what broke, and the audio is always kept.
+succeeded plus a note about what broke, and the audio is always kept — the raw `.caf`
+files are rescued next to the `.md` if even the mixing step fails. Network calls to
+Gemini and the transcription API retry with backoff on rate limits and transient errors
+before giving up.
+
+## Recovery
+
+```sh
+Alpiste --regenerate ~/MeetingNotes/2026-07-31-2214.md
+```
+
+Re-runs summarization on an already-written note file, in place, keeping its transcript.
+The path to reach for when the LLM was down (or `GEMINI_API_KEY` wasn't set yet) at
+recording time.
 
 ## Checks
 
@@ -80,8 +101,12 @@ succeeded plus a note about what broke, and the audio is always kept.
 Alpiste.app/Contents/MacOS/Alpiste --selftest
 ```
 
-Asserts the `.env` parser, the markdown assembly (including the degraded no-notes path),
-and that `ffmpeg` resolves without a login shell PATH. Exits non-zero on failure.
+Asserts the `.env` parser, the markdown assembly and its `--regenerate` round-trip
+(including the degraded no-notes path), filename collision handling, the
+calendar-independent timestamp format, and that `ffmpeg` resolves without a login shell
+PATH. It also actually runs the ffmpeg mixer twice, on synthetic tones, once for a single
+source and once for system + mic, since a filtergraph regression is the kind of failure
+only a real invocation catches. Exits non-zero on failure.
 
 To exercise transcription without recording anything, whisper-cpp ships a sample:
 
@@ -97,8 +122,10 @@ whisper-cli -m ~/Library/Application\ Support/Alpiste/models/ggml-medium.bin \
 ```
 
 Regenerates the icon, archives, signs with Developer ID, packages a DMG, notarizes it with
-Apple, and staples the ticket. Output lands in `build/Alpiste.dmg`. Uses the
-`yourlaunch-notary` keychain profile; override with `NOTARY_PROFILE=...`.
+Apple, and staples the ticket. Requires a clean working tree, `xcodegen`, and Pillow (for
+the icon). Output lands in `build/Alpiste-<version>.dmg`, where `<version>` comes from
+`MARKETING_VERSION` in `project.yml`. Uses the `yourlaunch-notary` keychain profile;
+override with `NOTARY_PROFILE=...`.
 
 ## The icon
 
