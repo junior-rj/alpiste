@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Installs Alpiste's runtime dependencies: ffmpeg, whisper.cpp, and the medium model.
+# Installs Alpiste's runtime and build dependencies: ffmpeg, whisper.cpp, xcodegen,
+# and the medium model.
 set -euo pipefail
 
 MODEL_DIR="$HOME/Library/Application Support/Alpiste/models"
@@ -8,8 +9,8 @@ MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium
 
 command -v brew >/dev/null || { echo "Homebrew is required: https://brew.sh"; exit 1; }
 
-echo "==> Installing ffmpeg and whisper-cpp"
-brew install ffmpeg whisper-cpp
+echo "==> Installing ffmpeg, whisper-cpp, and xcodegen"
+brew install ffmpeg whisper-cpp xcodegen
 
 if [ -f "$MODEL" ]; then
   echo "==> Model already present at $MODEL"
