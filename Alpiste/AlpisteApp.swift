@@ -63,6 +63,13 @@ struct AlpisteApp: App {
 
             Divider()
 
+            Button("About Alpiste") {
+                // Without this the panel can open behind other apps: LSUIElement
+                // means there's no Dock icon to click to bring it forward.
+                NSApp.activate(ignoringOtherApps: true)
+                NSApp.orderFrontStandardAboutPanel(options: [:])
+            }
+
             Button("Quit Alpiste") { NSApp.terminate(nil) }
                 .keyboardShortcut("q")
         } label: {
