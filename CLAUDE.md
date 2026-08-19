@@ -57,11 +57,17 @@ Produto próprio
   via callback e salva o que foi capturado até ali, em vez de deixar a UI travada em "Recording"
 - `Alpiste --regenerate <file.md>`: re-sumariza um .md já salvo, no lugar, reaproveitando o transcript
   (recuperação para quando o LLM falhou ou a chave não estava configurada na hora da gravação)
-- Resumo tem dois provedores em cadeia: Gemini primeiro, Groq (`GROQ_API_KEY`, modelo padrão
-  `openai/gpt-oss-120b`, override por `GROQ_MODEL`) se o Gemini falhar por qualquer motivo. O free
-  tier do Gemini tem cota de 20 requisições e dá 503/429 de verdade; a mesma chave do Groq já servia
-  de fallback de transcrição. O catálogo do Groq muda rápido: conferir em
-  `https://api.groq.com/openai/v1/models` antes de fixar nome de modelo
+- Resumo tem dois provedores em cadeia: **Groq primeiro** (`GROQ_API_KEY`, modelo padrão
+  `openai/gpt-oss-120b`, override por `GROQ_MODEL`), Gemini como reserva. A ordem é por
+  confiabilidade medida, não preferência: o free tier do Gemini tem cota de 20 requisições/dia e
+  deixou 3 reuniões sem resumo em 2 dias, uma delas despercebida por um dia, enquanto o Groq
+  respondeu todas as vezes. O Gemini fica em segundo porque a janela de contexto dele é muito
+  maior, o que o torna a rede de segurança para reunião longa o bastante para estourar o Groq.
+  A ordem é decisão testada em `Notes.summaryProviders` (função pura, coberta pelo `--selftest`):
+  se for mudar, mude o teste junto e de propósito
+- O catálogo do Groq muda rápido e a página de marketing atrasa em relação à API (em 19/08 a
+  página listava Llama 3.3 70B que a API já não servia): conferir em
+  `https://api.groq.com/openai/v1/models` com a chave antes de fixar nome de modelo
 - Recuperação é automática: `Backfill` varre `~/MeetingNotes` atrás de .md dos últimos 7 dias que
   tenham transcript mas não tenham resumo, e regenera. Roda na abertura do app e em +5/+15/+45 min
   depois de uma gravação que terminou sem resumo; para assim que nada fica pendente. O mesmo sweep

@@ -304,27 +304,45 @@ enum Notes {
         Transcript:
         """
 
-    /// Gemini first, Groq second. A whole meeting's summary used to hinge on one free
-    /// tier being up; the providers are independent, so an outage on one no longer
-    /// costs the notes. Every provider's failure is reported, since a summary that
-    /// silently came from the fallback is still worth explaining if both misbehave.
+    enum Summarizer: String {
+        case groq = "Groq"
+        case gemini = "Gemini"
+
+        var keyName: String {
+            switch self {
+            case .groq: "GROQ_API_KEY"
+            case .gemini: "GEMINI_API_KEY"
+            }
+        }
+    }
+
+    /// Pure: the summarizers that are configured, in the order to try them. Groq leads
+    /// on measured reliability, not preference: Gemini's free tier caps at 20 requests a
+    /// day and left three meetings unsummarized across two days, one of them unnoticed
+    /// for a day. Gemini stays as the fallback, where its far larger context window is
+    /// the safety net for a meeting long enough to overflow Groq. Covered by `--selftest`.
+    static func summaryProviders(_ env: [String: String]) -> [Summarizer] {
+        [.groq, .gemini].filter { !(env[$0.keyName] ?? "").isEmpty }
+    }
+
+    /// Two independent providers, so an outage on one no longer costs a meeting's
+    /// summary. Every provider's failure is reported: knowing both misbehaved is what
+    /// separates "the note is missing" from "the note is missing and here is why".
     static func summarize(_ transcript: String) async throws -> String {
         let env = Env.load()
-        var providers: [(name: String, run: () async throws -> String)] = []
-        if let key = env["GEMINI_API_KEY"], !key.isEmpty {
-            providers.append(("Gemini", { try await summarizeViaGemini(transcript, key: key, env: env) }))
-        }
-        if let key = env["GROQ_API_KEY"], !key.isEmpty {
-            providers.append(("Groq", { try await summarizeViaGroq(transcript, key: key, env: env) }))
-        }
+        let providers = summaryProviders(env)
         guard !providers.isEmpty else { throw Failure.noLLMKey }
 
         var failures: [String] = []
         for provider in providers {
+            let key = env[provider.keyName] ?? ""
             do {
-                return try await provider.run()
+                switch provider {
+                case .groq: return try await summarizeViaGroq(transcript, key: key, env: env)
+                case .gemini: return try await summarizeViaGemini(transcript, key: key, env: env)
+                }
             } catch {
-                failures.append("\(provider.name): \(error.localizedDescription)")
+                failures.append("\(provider.rawValue): \(error.localizedDescription)")
             }
         }
         throw Failure.badResponse(failures.joined(separator: " / "))

@@ -26,17 +26,19 @@ fi
 mkdir -p "$HOME/.alpiste"
 if [ ! -f "$HOME/.alpiste/.env" ]; then
   cat > "$HOME/.alpiste/.env" <<'EOF'
-# Notes generation. Free tier: https://aistudio.google.com/apikey
-GEMINI_API_KEY=
-# Optional, defaults to gemini-flash-latest
-# GEMINI_MODEL=
-
-# Groq (free tier: https://console.groq.com/keys) does double duty: it writes the notes
-# when Gemini is down, and transcribes when the local whisper model is missing.
-# GROQ_API_KEY=
+# Notes generation, first choice. Free tier: https://console.groq.com/keys
+# Also transcribes when the local whisper model is missing.
+GROQ_API_KEY=
 # Optional, defaults to openai/gpt-oss-120b. Groq retires models often; the current
 # list is at https://api.groq.com/openai/v1/models
 # GROQ_MODEL=
+
+# Notes generation, fallback when Groq fails. Free tier: https://aistudio.google.com/apikey
+# Capped at 20 requests a day, which is why it is second, but its context window is far
+# larger, so it is the one that can still handle a very long meeting.
+# GEMINI_API_KEY=
+# Optional, defaults to gemini-flash-latest
+# GEMINI_MODEL=
 
 # Optional transcription fallback, only used when the local model is missing.
 # OPENAI_API_KEY=

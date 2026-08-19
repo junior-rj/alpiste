@@ -410,6 +410,18 @@ enum SelfTest {
         expect(!Notes.pendingSummary(markdown: noTranscript),
                "pendingSummary: false when there is no transcript to summarize")
 
+        // Provider order is a deliberate call, not an accident of how the ifs are typed:
+        // Gemini's free tier caps at 20 requests a day and lost three meetings in two
+        // days, while Groq answered every time it was asked. Groq leads.
+        expect(Notes.summaryProviders(["GROQ_API_KEY": "g", "GEMINI_API_KEY": "x"]) == [.groq, .gemini],
+               "summaryProviders: Groq leads when both are configured")
+        expect(Notes.summaryProviders(["GEMINI_API_KEY": "x"]) == [.gemini],
+               "summaryProviders: Gemini alone when Groq has no key")
+        expect(Notes.summaryProviders(["GROQ_API_KEY": "g"]) == [.groq],
+               "summaryProviders: Groq alone when Gemini has no key")
+        expect(Notes.summaryProviders(["GEMINI_API_KEY": "", "GROQ_API_KEY": ""]).isEmpty,
+               "summaryProviders: an empty key does not count as configured")
+
         expect(Notes.stamp(Date(timeIntervalSince1970: 0)).count == 15, "stamp: YYYY-MM-DD-HHMM")
         // Guards against a non-Gregorian system calendar (Japanese, Buddhist, ...)
         // silently turning "yyyy" into an era year and breaking the filename format.
