@@ -29,7 +29,12 @@ Produto próprio
 - Alpiste/AlpisteApp.swift — MenuBarExtra, máquina de estados, permissões, `SelfTest`
 - scripts/setup.sh — brew deps + download do ggml-medium.bin + ~/.alpiste/.env
 - scripts/make-icon.py — gera o AppIcon (grãos-onda) com Pillow, sem dependência externa
-- scripts/release.sh — DMG assinado (Developer ID) e notarizado, perfil yourlaunch-notary
+- scripts/release.sh — DMG assinado (Developer ID) e notarizado, perfil yourlaunch-notary.
+  **Gerou DMG, instala em /Applications na sequência, sempre.** DMG parado em `build/` não serve
+  de nada: o app da barra de menu continua na versão velha e o que foi testado não é o que roda.
+  Encerrar o Alpiste em execução antes (conferindo que não há gravação em andamento em
+  `~/Library/Application Support/Alpiste/captures/`), substituir o .app e relançar. A permissão
+  de TCC sobrevive porque a identidade Developer ID é a mesma
 
 ## Regras específicas
 - O ScreenCaptureKit NÃO mistura mic com áudio do sistema: chegam em output types e formatos
