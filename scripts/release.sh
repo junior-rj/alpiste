@@ -68,6 +68,27 @@ spctl -a -t exec -vv "$STAGE/export/$APP_NAME.app"
 echo "==> Limpando artefatos intermediários"
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 "$LSREGISTER" -u "$STAGE/export/$APP_NAME.app" 2>/dev/null || true
+
+# O export não é o único registro que o archive cria: o xcodebuild também registra o
+# .app intermediário dentro do DerivedData, e o caminho dele muda entre releases
+# (BuildProductsPath numa vez, InstallationBuildProductsLocation noutra), então glob
+# fixo não pega. Perguntar ao próprio LaunchServices o que está registrado é o único
+# jeito estável. Preserva só o app instalado; todo o resto é artefato de build.
+# O `|| true` não é decorativo: sob `set -o pipefail`, um grep sem correspondência
+# (nenhum registro sobrando, que é o caso bom) sai com 1 e abortaria o release aqui,
+# depois do DMG já estar pronto e notarizado.
+STRAYS=$("$LSREGISTER" -dump 2>/dev/null \
+  | grep -o "/[^ ]*$APP_NAME\.app" \
+  | sort -u \
+  | grep -vE "^($HOME)?/Applications/$APP_NAME\.app\$" || true)
+
+if [ -n "$STRAYS" ]; then
+  while read -r stray; do
+    echo "    desregistrando $stray"
+    "$LSREGISTER" -u "$stray" 2>/dev/null || true
+  done <<< "$STRAYS"
+fi
+
 rm -rf "$STAGE"
 
 echo "==> Pronto: $DMG"

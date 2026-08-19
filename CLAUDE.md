@@ -30,6 +30,11 @@ Produto próprio
 - scripts/setup.sh — brew deps + download do ggml-medium.bin + ~/.alpiste/.env
 - scripts/make-icon.py — gera o AppIcon (grãos-onda) com Pillow, sem dependência externa
 - scripts/release.sh — DMG assinado (Developer ID) e notarizado, perfil yourlaunch-notary.
+  No fim ele pergunta ao LaunchServices quais `Alpiste.app` estão registrados e desregistra tudo
+  que não seja o instalado. É por consulta, e não por caminho fixo, porque o `.app` intermediário
+  do archive muda de lugar dentro do DerivedData entre releases (`BuildProductsPath` numa vez,
+  `InstallationBuildProductsLocation` noutra). DerivedData continua FORA do repo de propósito:
+  dentro do Documents o iCloud recarimba atributos e o codesign rejeita como detritus.
   **Gerou DMG, instala em /Applications na sequência, sempre.** DMG parado em `build/` não serve
   de nada: o app da barra de menu continua na versão velha e o que foi testado não é o que roda.
   Encerrar o Alpiste em execução antes (conferindo que não há gravação em andamento em
