@@ -304,9 +304,34 @@ enum Notes {
         Transcript:
         """
 
+    /// Gemini first, Groq second. A whole meeting's summary used to hinge on one free
+    /// tier being up; the providers are independent, so an outage on one no longer
+    /// costs the notes. Every provider's failure is reported, since a summary that
+    /// silently came from the fallback is still worth explaining if both misbehave.
     static func summarize(_ transcript: String) async throws -> String {
         let env = Env.load()
-        guard let key = env["GEMINI_API_KEY"], !key.isEmpty else { throw Failure.noLLMKey }
+        var providers: [(name: String, run: () async throws -> String)] = []
+        if let key = env["GEMINI_API_KEY"], !key.isEmpty {
+            providers.append(("Gemini", { try await summarizeViaGemini(transcript, key: key, env: env) }))
+        }
+        if let key = env["GROQ_API_KEY"], !key.isEmpty {
+            providers.append(("Groq", { try await summarizeViaGroq(transcript, key: key, env: env) }))
+        }
+        guard !providers.isEmpty else { throw Failure.noLLMKey }
+
+        var failures: [String] = []
+        for provider in providers {
+            do {
+                return try await provider.run()
+            } catch {
+                failures.append("\(provider.name): \(error.localizedDescription)")
+            }
+        }
+        throw Failure.badResponse(failures.joined(separator: " / "))
+    }
+
+    private static func summarizeViaGemini(_ transcript: String, key: String,
+                                           env: [String: String]) async throws -> String {
         // An alias, not a pinned version, so this doesn't rot when models turn over.
         let model = env["GEMINI_MODEL"] ?? "gemini-flash-latest"
         guard model.allSatisfy({ $0.isLetter || $0.isNumber || "-._".contains($0) }),
@@ -337,7 +362,49 @@ enum Notes {
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// Groq's OpenAI-compatible chat endpoint. Unlike Gemini the model name only ever
+    /// reaches the JSON body, so it needs no character validation.
+    private static func summarizeViaGroq(_ transcript: String, key: String,
+                                         env: [String: String]) async throws -> String {
+        // Groq's free catalog turns over (the Llama 3.3 default this shipped with was
+        // withdrawn within the day). `GROQ_MODEL` is the escape hatch; the current list
+        // is at https://api.groq.com/openai/v1/models.
+        let model = env["GROQ_MODEL"] ?? "openai/gpt-oss-120b"
+        guard let url = URL(string: "https://api.groq.com/openai/v1/chat/completions") else {
+            throw Failure.badResponse("invalid Groq endpoint")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 180
+        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": model,
+            "messages": [["role": "user", "content": "\(prompt)\n\n\(transcript)"]],
+        ])
+
+        let data = try await Self.fetchWithRetry(request)
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let choices = json["choices"] as? [[String: Any]],
+              let message = choices.first?["message"] as? [String: Any],
+              let text = message["content"] as? String else {
+            throw Failure.badResponse("Groq returned no choices")
+        }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw Failure.badResponse("Groq returned an empty response")
+        }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     // MARK: - Output
+
+    /// Written in place of the notes when summarization produced nothing. Doubles as the
+    /// marker the backfill sweep looks for, so the two must stay in sync.
+    static let noNotesPlaceholder = "_No notes were generated. The transcript is below._"
+
+    /// Separates the notes from the transcript. `split` and `pendingSummary` both key
+    /// off it, so it lives in one place.
+    static let transcriptDivider = "\n---\n\n## Transcript\n\n"
 
     /// Pure: assembles the final file. Covered by `--selftest`.
     static func markdown(title: String,
@@ -357,8 +424,8 @@ enum Notes {
             for problem in problems { out += "> - \(problem)\n" }
             out += "\n"
         }
-        out += (notes ?? "_No notes were generated. The transcript is below._") + "\n\n"
-        out += "---\n\n## Transcript\n\n"
+        out += (notes ?? noNotesPlaceholder) + "\n"
+        out += transcriptDivider
         out += transcript.isEmpty ? "_No transcript was produced._\n" : transcript + "\n"
         return out
     }
@@ -368,8 +435,7 @@ enum Notes {
     /// transcript; the problems blockquote and the no-notes placeholder are exactly
     /// what regeneration replaces, so they are dropped. Covered by `--selftest`.
     static func split(markdown: String) -> (header: String, transcript: String)? {
-        let divider = "\n---\n\n## Transcript\n\n"
-        guard let range = markdown.range(of: divider) else { return nil }
+        guard let range = markdown.range(of: transcriptDivider) else { return nil }
         let transcript = String(markdown[range.upperBound...])
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !transcript.isEmpty, transcript != "_No transcript was produced._" else { return nil }
@@ -378,6 +444,18 @@ enum Notes {
         }
         guard kept.first?.hasPrefix("# ") == true else { return nil }
         return (kept.joined(separator: "\n\n"), transcript)
+    }
+
+    /// Pure: true when a saved note still has a transcript worth summarizing but no
+    /// notes, which is exactly what the backfill sweep retries. A note that failed to
+    /// transcribe at all is not pending: there is nothing to feed the LLM.
+    /// Covered by `--selftest`.
+    static func pendingSummary(markdown: String) -> Bool {
+        guard split(markdown: markdown) != nil,
+              let divider = markdown.range(of: transcriptDivider) else { return false }
+        // Only above the divider: a transcript that happens to quote the placeholder
+        // must not make a finished note look pending.
+        return markdown[..<divider.lowerBound].contains(noNotesPlaceholder)
     }
 
     /// Re-runs summarization on an already-written note file, in place. Backs
@@ -483,7 +561,7 @@ enum Notes {
             case .noTranscriber:
                 "No local model at \(Notes.modelURL.path) and no GROQ_API_KEY or OPENAI_API_KEY set."
             case .noLLMKey:
-                "No GEMINI_API_KEY set, so the transcript was saved without notes."
+                "No GEMINI_API_KEY or GROQ_API_KEY set, so the transcript was saved without notes."
             case .commandFailed(let name, let code, let log):
                 "\(name) exited with code \(code). \(log)"
             case .badResponse(let detail):
@@ -575,7 +653,7 @@ enum Env {
 
     static func load() -> [String: String] {
         var values = parse((try? String(contentsOf: file, encoding: .utf8)) ?? "")
-        for key in ["GEMINI_API_KEY", "GEMINI_MODEL", "GROQ_API_KEY",
+        for key in ["GEMINI_API_KEY", "GEMINI_MODEL", "GROQ_API_KEY", "GROQ_MODEL",
                     "GROQ_WHISPER_MODEL", "OPENAI_API_KEY", "OPENAI_WHISPER_MODEL"] {
             if let override = ProcessInfo.processInfo.environment[key], !override.isEmpty {
                 values[key] = override

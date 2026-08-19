@@ -24,7 +24,8 @@ Produto próprio
 ## Arquivos importantes
 - project.yml — definição do projeto (rodar `xcodegen` após mudar)
 - Alpiste/Recorder.swift — SCStream, escreve system.caf e mic.caf separados
-- Alpiste/Notes.swift — mix ffmpeg, whisper, Gemini, escrita do markdown; `Tool` e `Env`
+- Alpiste/Notes.swift — mix ffmpeg, whisper, Gemini/Groq, escrita do markdown; `Tool` e `Env`
+- Alpiste/Backfill.swift — varredura que regenera resumos que falharam (launch e agendada)
 - Alpiste/AlpisteApp.swift — MenuBarExtra, máquina de estados, permissões, `SelfTest`
 - scripts/setup.sh — brew deps + download do ggml-medium.bin + ~/.alpiste/.env
 - scripts/make-icon.py — gera o AppIcon (grãos-onda) com Pillow, sem dependência externa
@@ -51,8 +52,27 @@ Produto próprio
   via callback e salva o que foi capturado até ali, em vez de deixar a UI travada em "Recording"
 - `Alpiste --regenerate <file.md>`: re-sumariza um .md já salvo, no lugar, reaproveitando o transcript
   (recuperação para quando o LLM falhou ou a chave não estava configurada na hora da gravação)
+- Resumo tem dois provedores em cadeia: Gemini primeiro, Groq (`GROQ_API_KEY`, modelo padrão
+  `openai/gpt-oss-120b`, override por `GROQ_MODEL`) se o Gemini falhar por qualquer motivo. O free
+  tier do Gemini tem cota de 20 requisições e dá 503/429 de verdade; a mesma chave do Groq já servia
+  de fallback de transcrição. O catálogo do Groq muda rápido: conferir em
+  `https://api.groq.com/openai/v1/models` antes de fixar nome de modelo
+- Recuperação é automática: `Backfill` varre `~/MeetingNotes` atrás de .md dos últimos 7 dias que
+  tenham transcript mas não tenham resumo, e regenera. Roda na abertura do app e em +5/+15/+45 min
+  depois de uma gravação que terminou sem resumo; para assim que nada fica pendente. O mesmo sweep
+  na mão: `Alpiste --backfill`
+- O marcador de "falta resumo" é o placeholder `_No notes were generated…`, procurado só acima do
+  divisor do transcript (`Notes.pendingSummary`). Se mudar o texto do placeholder, a varredura para
+  de achar os arquivos: por isso ele é uma constante única compartilhada com o `markdown()`
+- Regenerar reconstrói o arquivo a partir do `split()`, que preserva só título, linha de áudio e
+  transcript. Avisos não relacionados ao LLM (ex: "áudio bruto preservado como X") somem na
+  regeneração; foi decisão consciente para não complicar o `split()`
 - `Tool.run` é assíncrono e tem timeout (default 30 min, whisper usa 4h): nunca bloqueia o
   cooperative pool do Swift Concurrency, e um processo pendurado não trava o pipeline pra sempre
 - Check único: `Alpiste.app/Contents/MacOS/Alpiste --selftest` (assíncrono; roda ffmpeg de verdade no mixer)
 - "About Alpiste" no menu chama o painel nativo do macOS (`NSApp.orderFrontStandardAboutPanel`), que lê
   nome/versão/copyright direto do Info.plist. Sem tela custom
+- Fallback do Gemini avaliado em 2026-08-18 e descartado: o Foundation Models da Apple (on-device,
+  `import FoundationModels`) tem janela de contexto de só 4096 tokens (confirmado no `.swiftinterface`
+  do SDK), insuficiente pra reunião longa — serviria no máximo de fallback pra reunião curta. Decisão:
+  não implementar, deixar como está

@@ -31,8 +31,14 @@ GEMINI_API_KEY=
 # Optional, defaults to gemini-flash-latest
 # GEMINI_MODEL=
 
-# Optional transcription fallback, only used when the local model is missing.
+# Groq (free tier: https://console.groq.com/keys) does double duty: it writes the notes
+# when Gemini is down, and transcribes when the local whisper model is missing.
 # GROQ_API_KEY=
+# Optional, defaults to openai/gpt-oss-120b. Groq retires models often; the current
+# list is at https://api.groq.com/openai/v1/models
+# GROQ_MODEL=
+
+# Optional transcription fallback, only used when the local model is missing.
 # OPENAI_API_KEY=
 EOF
   chmod 600 "$HOME/.alpiste/.env"
