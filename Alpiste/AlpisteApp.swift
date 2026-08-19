@@ -12,6 +12,25 @@ struct AlpisteApp: App {
         if let flag = CommandLine.arguments.firstIndex(of: "--regenerate") {
             Self.regenerate(CommandLine.arguments.dropFirst(flag + 1).first)
         }
+        if CommandLine.arguments.contains("--backfill") { Self.backfill() }
+    }
+
+    /// `Alpiste --backfill`: runs the sweep the app performs on its own, now and from a
+    /// terminal, over every recent note still missing its summary. Parks the main thread
+    /// for the same reason `--regenerate` does.
+    private static func backfill() -> Never {
+        Task { @MainActor in
+            let result = await Backfill.sweep()
+            for file in result.filled { print("ok   filled in \(file.lastPathComponent)") }
+            for failure in result.failed {
+                print("FAIL \(failure.file.lastPathComponent): \(failure.reason)")
+            }
+            if result.filled.isEmpty && result.failed.isEmpty {
+                print("ok   nothing pending")
+            }
+            exit(result.failed.isEmpty ? 0 : 1)
+        }
+        dispatchMain()
     }
 
     /// `Alpiste --regenerate <file.md>`: re-summarizes a saved note in place, the
@@ -202,7 +221,26 @@ final class AppState {
                 alert("Could not save notes", message)
             }
 
+            // A summary that failed now can succeed in a few minutes, so retry on a
+            // schedule instead of leaving the note for the user to notice and repair.
+            if let file = result.file,
+               let contents = try? String(contentsOf: file, encoding: .utf8),
+               Notes.pendingSummary(markdown: contents) {
+                Backfill.scheduleRetries()
+            }
+
             if pendingTermination { NSApp.reply(toApplicationShouldTerminate: true) }
+        }
+    }
+
+    /// A backfill sweep filled in a note after the fact. Point "Open …" at it and say so
+    /// in the menu, but never while something is live: overwriting a recording's status
+    /// line would be worse than staying quiet until it finishes.
+    func noteBackfilled(_ file: URL) {
+        lastNote = file
+        switch phase {
+        case .idle, .done, .failed: phase = .done(file)
+        case .recording, .working: break
         }
     }
 
@@ -247,6 +285,12 @@ final class AppState {
 /// saving before AppKit is allowed to tear the app down.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Catches notes left unsummarized by an earlier run: the app may well have been
+        // quit before its retry schedule had a chance to fire.
+        Backfill.sweepAtLaunch()
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         let state = AppState.shared
         switch state.phase {
@@ -350,6 +394,21 @@ enum SelfTest {
             expect(false, "split: parses a healthy note file")
         }
         expect(Notes.split(markdown: "# no divider") == nil, "split: nil without a divider")
+
+        // What the backfill sweep keys off: retry the notes that are missing, leave the
+        // rest alone. A wrong answer here either loses summaries or rewrites good files.
+        expect(Notes.pendingSummary(markdown: failed),
+               "pendingSummary: true when the LLM failed but the transcript survived")
+        expect(!Notes.pendingSummary(markdown: healthy),
+               "pendingSummary: false when the note already has its summary")
+        expect(!Notes.pendingSummary(markdown: "# no divider"),
+               "pendingSummary: false without a transcript section")
+        // Transcription itself failed, so there is nothing to re-summarize; sweeping this
+        // file forever would just burn API calls.
+        let noTranscript = Notes.markdown(title: "t", notes: nil, transcript: "",
+                                          audioFile: "a.m4a", problems: ["Transcription failed"])
+        expect(!Notes.pendingSummary(markdown: noTranscript),
+               "pendingSummary: false when there is no transcript to summarize")
 
         expect(Notes.stamp(Date(timeIntervalSince1970: 0)).count == 15, "stamp: YYYY-MM-DD-HHMM")
         // Guards against a non-Gregorian system calendar (Japanese, Buddhist, ...)
