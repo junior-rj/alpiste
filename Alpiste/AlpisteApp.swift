@@ -19,6 +19,7 @@ struct AlpisteApp: App {
     /// terminal, over every recent note still missing its summary. Parks the main thread
     /// for the same reason `--regenerate` does.
     private static func backfill() -> Never {
+        Log.startup("--backfill")
         Task { @MainActor in
             let result = await Backfill.sweep()
             for file in result.filled { print("ok   filled in \(file.lastPathComponent)") }
@@ -28,6 +29,7 @@ struct AlpisteApp: App {
             if result.filled.isEmpty && result.failed.isEmpty {
                 print("ok   nothing pending")
             }
+            Log.flush()
             exit(result.failed.isEmpty ? 0 : 1)
         }
         dispatchMain()
@@ -40,16 +42,22 @@ struct AlpisteApp: App {
     private static func regenerate(_ path: String?) -> Never {
         guard let path else {
             print("usage: Alpiste --regenerate <file.md>")
+            Log.flush()
             exit(2)
         }
         let file = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+        Log.startup("--regenerate \(file.lastPathComponent)")
         Task.detached {
             do {
                 try await Notes.regenerate(file: file)
+                Log.write("regenerate: rewrote \(file.lastPathComponent)")
                 print("ok   rewrote \(file.lastPathComponent)")
+                Log.flush()
                 exit(0)
             } catch {
+                Log.write("regenerate: failed — \(error.localizedDescription)")
                 print("FAIL \(error.localizedDescription)")
+                Log.flush()
                 exit(1)
             }
         }
@@ -79,6 +87,9 @@ struct AlpisteApp: App {
                                                          withIntermediateDirectories: true)
                 NSWorkspace.shared.open(Notes.outputDirectory)
             }
+            // The answer to "it showed an error and I couldn't capture it": the log is a
+            // plain text file the user can open and hand over as-is.
+            Button("Open Log") { NSWorkspace.shared.open(Log.flushed()) }
 
             Divider()
 
@@ -110,6 +121,11 @@ final class AppState {
         case recording
         case working(String)
         case done(URL)
+        /// Saved, but the summary is missing and the backfill is going to try again.
+        /// Distinct from `failed` because nothing is lost yet and no alert is warranted.
+        case retrying(URL)
+        /// Saved and recovered by a backfill pass after the recording had finished.
+        case recovered(URL)
         case failed(String)
     }
 
@@ -136,6 +152,8 @@ final class AppState {
         case .recording: "Recording \(elapsed)"
         case .working(let step): step
         case .done(let url): "Saved \(url.lastPathComponent)"
+        case .retrying(let url): "Saved \(url.lastPathComponent) — notes pending, retrying"
+        case .recovered(let url): "Recovered notes for \(url.lastPathComponent)"
         case .failed(let message): "Failed: \(message)"
         }
     }
@@ -174,7 +192,9 @@ final class AppState {
                 startedAt = started
                 phase = .recording
                 startTicking(from: started)
+                Log.write("recording started")
             } catch {
+                Log.write("recording could not start — \(error.localizedDescription)")
                 phase = .failed(error.localizedDescription)
                 alert("Could not start recording", error.localizedDescription)
             }
@@ -186,6 +206,7 @@ final class AppState {
     /// "Recording" with nothing further ever being written.
     private func streamFailed(_ error: Error) {
         guard isRecording, session != nil else { return }  // a user-initiated stop already tore this down
+        Log.write("capture stream stopped on its own — \(error.localizedDescription)")
         alert("Recording interrupted",
               "The capture stream stopped (\(error.localizedDescription)). "
                 + "Saving what was recorded so far.")
@@ -198,10 +219,13 @@ final class AppState {
         stopTicking()
         phase = .working("Mixing audio…")
 
+        Log.write("recording stopped after \(elapsed), starting the pipeline")
+
         Task {
             let capture = await session.stop()
             // Hops back to the main actor to publish each step of the pipeline.
             let result = await Notes.process(capture, startedAt: startedAt) { step in
+                Log.write("pipeline: \(step)")
                 Task { @MainActor in
                     if case .working = self.phase { self.phase = .working(step) }
                 }
@@ -209,24 +233,30 @@ final class AppState {
 
             if let file = result.file {
                 lastNote = file
-                phase = .done(file)
-                if !result.problems.isEmpty {
+
+                // A summary that failed now can succeed in a few minutes, so retry on a
+                // schedule instead of leaving the note for the user to notice and repair.
+                let contents = try? String(contentsOf: file, encoding: .utf8)
+                let summaryPending = contents.map(Notes.pendingSummary) ?? false
+                if summaryPending { Backfill.scheduleRetries() }
+
+                // Only the problems a retry cannot fix are worth interrupting for. On
+                // 2026-08-20 a modal fired the instant three further attempts had been
+                // scheduled, one of them succeeded six minutes later, and the alarm was
+                // never taken back — so the meeting read as lost all day when it wasn't.
+                let unrecoverable = Notes.problemsWorthAlerting(result.problems,
+                                                               summaryPending: summaryPending)
+                phase = summaryPending && unrecoverable.isEmpty ? .retrying(file) : .done(file)
+                if !unrecoverable.isEmpty {
                     alert("Saved with warnings",
                           "\(file.lastPathComponent) was written, but:\n\n"
-                            + result.problems.map { "• \($0)" }.joined(separator: "\n"))
+                            + unrecoverable.map { "• \($0)" }.joined(separator: "\n")
+                            + "\n\nDetails in \(Log.file.path)")
                 }
             } else {
                 let message = result.problems.joined(separator: "\n")
                 phase = .failed(message)
-                alert("Could not save notes", message)
-            }
-
-            // A summary that failed now can succeed in a few minutes, so retry on a
-            // schedule instead of leaving the note for the user to notice and repair.
-            if let file = result.file,
-               let contents = try? String(contentsOf: file, encoding: .utf8),
-               Notes.pendingSummary(markdown: contents) {
-                Backfill.scheduleRetries()
+                alert("Could not save notes", message + "\n\nDetails in \(Log.file.path)")
             }
 
             if pendingTermination { NSApp.reply(toApplicationShouldTerminate: true) }
@@ -239,9 +269,24 @@ final class AppState {
     func noteBackfilled(_ file: URL) {
         lastNote = file
         switch phase {
-        case .idle, .done, .failed: phase = .done(file)
+        // Says recovered, not merely saved: after a `retrying` status the difference
+        // between "the note exists" and "the note finally has its notes" is the whole
+        // question the user is left holding.
+        case .idle, .done, .retrying, .recovered, .failed: phase = .recovered(file)
         case .recording, .working: break
         }
+    }
+
+    /// Every scheduled retry is spent and a note is still missing its summary. This is
+    /// the moment the alert deferred at recording time comes due.
+    func backfillGaveUp() {
+        guard case .retrying(let file) = phase else { return }
+        phase = .failed("no notes for \(file.lastPathComponent)")
+        alert("Could not generate notes",
+              "\(file.lastPathComponent) still has no summary after every retry. "
+                + "The transcript and audio are safe — run\n\n"
+                + "Alpiste --regenerate \(file.path)\n\nto try again.\n\n"
+                + "Details in \(Log.file.path)")
     }
 
     // MARK: - Helpers
@@ -286,6 +331,7 @@ final class AppState {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        Log.startup("launched")
         // Catches notes left unsummarized by an earlier run: the app may well have been
         // quit before its retry schedule had a chance to fire.
         Backfill.sweepAtLaunch()
@@ -317,6 +363,7 @@ enum SelfTest {
         Task.detached {
             let failures = await checks()
             print(failures.isEmpty ? "\nPASS" : "\nFAIL (\(failures.count))")
+            Log.flush()
             exit(failures.isEmpty ? 0 : 1)
         }
         dispatchMain()
@@ -413,14 +460,56 @@ enum SelfTest {
         // Provider order is a deliberate call, not an accident of how the ifs are typed:
         // Gemini's free tier caps at 20 requests a day and lost three meetings in two
         // days, while Groq answered every time it was asked. Groq leads.
-        expect(Notes.summaryProviders(["GROQ_API_KEY": "g", "GEMINI_API_KEY": "x"]) == [.groq, .gemini],
-               "summaryProviders: Groq leads when both are configured")
-        expect(Notes.summaryProviders(["GEMINI_API_KEY": "x"]) == [.gemini],
+        let bothKeys = ["GROQ_API_KEY": "g", "GEMINI_API_KEY": "x"]
+        let short = 5_000
+        // The transcript that hit Groq's 413 on 2026-08-20: 38772 characters, which the
+        // API counted as 9475 tokens against an 8000-per-minute cap.
+        let long = 38_772
+
+        expect(Notes.summaryProviders(bothKeys, transcriptCharacters: short) == [.groq, .gemini],
+               "summaryProviders: Groq leads on a short transcript")
+        expect(Notes.summaryProviders(bothKeys, transcriptCharacters: long) == [.gemini, .groq],
+               "summaryProviders: Gemini leads on a transcript too long for Groq")
+        // Reordering, not dropping: on 2026-08-20 Gemini answered 503 four times running,
+        // and a list with one provider left in it would have had nowhere to fall through to.
+        expect(Notes.summaryProviders(bothKeys, transcriptCharacters: long).count == 2,
+               "summaryProviders: the long-transcript order keeps Groq as the fallback")
+        expect(Notes.summaryProviders(bothKeys, transcriptCharacters: Notes.groqTranscriptLimit)
+                == [.groq, .gemini],
+               "summaryProviders: the limit itself still leads with Groq")
+        expect(Notes.summaryProviders(bothKeys, transcriptCharacters: Notes.groqTranscriptLimit + 1)
+                == [.gemini, .groq],
+               "summaryProviders: one character past the limit flips the order")
+        expect(Notes.summaryProviders(["GEMINI_API_KEY": "x"], transcriptCharacters: short) == [.gemini],
                "summaryProviders: Gemini alone when Groq has no key")
-        expect(Notes.summaryProviders(["GROQ_API_KEY": "g"]) == [.groq],
+        expect(Notes.summaryProviders(["GROQ_API_KEY": "g"], transcriptCharacters: short) == [.groq],
                "summaryProviders: Groq alone when Gemini has no key")
-        expect(Notes.summaryProviders(["GEMINI_API_KEY": "", "GROQ_API_KEY": ""]).isEmpty,
+        expect(Notes.summaryProviders(["GROQ_API_KEY": "g"], transcriptCharacters: long) == [.groq],
+               "summaryProviders: a long transcript still tries Groq when it is the only key")
+        expect(Notes.summaryProviders(["GEMINI_API_KEY": "", "GROQ_API_KEY": ""],
+                                      transcriptCharacters: short).isEmpty,
                "summaryProviders: an empty key does not count as configured")
+
+        // The alert path keys off this prefix to tell a failure the backfill will retry
+        // from one it cannot. If the two drift apart, every summary failure goes back to
+        // firing a modal that the retry schedule immediately contradicts.
+        expect(Notes.markdown(title: "t", notes: nil, transcript: "x", audioFile: nil,
+                              problems: [Notes.summaryFailurePrefix + "Groq: 413"])
+                .contains(Notes.noNotesPlaceholder),
+               "summaryFailurePrefix: a summary failure leaves the note pending")
+
+        let summaryFailed = Notes.summaryFailurePrefix + "Groq: 413 / Gemini: 503"
+        let mixFailed = "Audio mixing failed: ffmpeg exited 1"
+        expect(Notes.problemsWorthAlerting([summaryFailed], summaryPending: true).isEmpty,
+               "problemsWorthAlerting: a retryable summary failure raises no alert")
+        expect(Notes.problemsWorthAlerting([summaryFailed, mixFailed], summaryPending: true)
+                == [mixFailed],
+               "problemsWorthAlerting: a mix failure still alerts alongside a retryable one")
+        // Nothing is going to retry it, so withholding it would bury the failure entirely.
+        expect(Notes.problemsWorthAlerting([summaryFailed], summaryPending: false) == [summaryFailed],
+               "problemsWorthAlerting: a summary failure nobody will retry does alert")
+        expect(Notes.problemsWorthAlerting([], summaryPending: true).isEmpty,
+               "problemsWorthAlerting: a clean run raises nothing")
 
         expect(Notes.stamp(Date(timeIntervalSince1970: 0)).count == 15, "stamp: YYYY-MM-DD-HHMM")
         // Guards against a non-Gregorian system calendar (Japanese, Buddhist, ...)
@@ -476,6 +565,13 @@ enum SelfTest {
             await mixCheck("system only", sources: 1)
             await mixCheck("system + mic", sources: 2)
         }
+        // A log that silently fails to write would put us back where 2026-08-20 left us,
+        // so prove it round-trips rather than assuming the directory is there.
+        let marker = "selftest marker \(UUID().uuidString)"
+        Log.write(marker)
+        let logged = (try? String(contentsOf: Log.flushed(), encoding: .utf8)) ?? ""
+        expect(logged.contains(marker), "log: writes reach \(Log.file.path)")
+
         let whisper = Tool.find("whisper-cli") != nil
         print("\(whisper ? "ok  " : "note") tools: whisper-cli \(whisper ? "found" : "missing, run scripts/setup.sh")")
         let model = FileManager.default.fileExists(atPath: Notes.modelURL.path)

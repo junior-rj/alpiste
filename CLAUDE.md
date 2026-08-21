@@ -26,6 +26,7 @@ Produto próprio
 - Alpiste/Recorder.swift — SCStream, escreve system.caf e mic.caf separados
 - Alpiste/Notes.swift — mix ffmpeg, whisper, Gemini/Groq, escrita do markdown; `Tool` e `Env`
 - Alpiste/Backfill.swift — varredura que regenera resumos que falharam (launch e agendada)
+- Alpiste/Log.swift — registro persistente em `~/Library/Logs/Alpiste/alpiste.log`
 - Alpiste/AlpisteApp.swift — MenuBarExtra, máquina de estados, permissões, `SelfTest`
 - scripts/setup.sh — brew deps + download do ggml-medium.bin + ~/.alpiste/.env
 - scripts/make-icon.py — gera o AppIcon (grãos-onda) com Pillow, sem dependência externa
@@ -62,14 +63,24 @@ Produto próprio
   via callback e salva o que foi capturado até ali, em vez de deixar a UI travada em "Recording"
 - `Alpiste --regenerate <file.md>`: re-sumariza um .md já salvo, no lugar, reaproveitando o transcript
   (recuperação para quando o LLM falhou ou a chave não estava configurada na hora da gravação)
-- Resumo tem dois provedores em cadeia: **Groq primeiro** (`GROQ_API_KEY`, modelo padrão
-  `openai/gpt-oss-120b`, override por `GROQ_MODEL`), Gemini como reserva. A ordem é por
-  confiabilidade medida, não preferência: o free tier do Gemini tem cota de 20 requisições/dia e
-  deixou 3 reuniões sem resumo em 2 dias, uma delas despercebida por um dia, enquanto o Groq
-  respondeu todas as vezes. O Gemini fica em segundo porque a janela de contexto dele é muito
-  maior, o que o torna a rede de segurança para reunião longa o bastante para estourar o Groq.
-  A ordem é decisão testada em `Notes.summaryProviders` (função pura, coberta pelo `--selftest`):
-  se for mudar, mude o teste junto e de propósito
+- Resumo tem dois provedores em cadeia, e a ordem **depende do tamanho do transcript**
+  (`Notes.summaryProviders`, função pura coberta pelo `--selftest`; se mudar a ordem, mude o teste
+  junto e de propósito). Até `Notes.groqTranscriptLimit` (29.000 chars) o **Groq lidera**
+  (`GROQ_API_KEY`, modelo padrão `openai/gpt-oss-120b`, override por `GROQ_MODEL`) por
+  confiabilidade medida: o free tier do Gemini tem cota de 20 requisições/dia e deixou 3 reuniões
+  sem resumo em 2 dias, uma delas despercebida por um dia. Acima do limite a ordem inverte e o
+  Gemini lidera, pela janela de contexto muito maior
+- A função **reordena, nunca descarta**: o provedor que não lidera continua sendo a reserva. Em
+  20/08 o Gemini respondeu 503 quatro vezes seguidas, e uma lista com um provedor só não teria
+  para onde cair
+- O limite do Groq é de **taxa, não de contexto**, e chega disfarçado de erro de tamanho. O tier
+  `on_demand` corta em **8.000 tokens por minuto** contando a requisição inteira, e devolve
+  **HTTP 413** ("Request too large … on tokens per minute (TPM): Limit 8000, Requested N"), não
+  429. O `gpt-oss-120b` tem 131k de contexto, então olhar só o modelo não explica a recusa.
+  Medido em 21/08: transcript de reunião em português roda a ~4,0 chars/token (38.772 chars =
+  9.475 tokens; 48.047 = 12.239), o prompt custa ~260 tokens, daí o limiar de 29.000 chars.
+  **Não mandar `max_tokens`**: o Groq soma o teto de saída ao cálculo de TPM, então declarar
+  `max_tokens=2000` num payload de 8.121 tokens pediu 10.121 e piorou a recusa
 - O catálogo do Groq muda rápido e a página de marketing atrasa em relação à API (em 19/08 a
   página listava Llama 3.3 70B que a API já não servia): conferir em
   `https://api.groq.com/openai/v1/models` com a chave antes de fixar nome de modelo
@@ -77,6 +88,21 @@ Produto próprio
   tenham transcript mas não tenham resumo, e regenera. Roda na abertura do app e em +5/+15/+45 min
   depois de uma gravação que terminou sem resumo; para assim que nada fica pendente. O mesmo sweep
   na mão: `Alpiste --backfill`
+- **Todo diagnóstico vai para `~/Library/Logs/Alpiste/alpiste.log`** (`Log.write`), aberto pelo item
+  "Open Log" do menu. Existe porque `print()` some quando o `.app` abre pelo Finder e o `NSLog` não
+  chegou ao log unificado em 20/08: o alerta modal era o único registro, e o usuário não conseguiu
+  nem ler nem printar. Um evento por linha (o `Log.write` achata espaço em branco, senão um corpo de
+  erro JSON do Gemini espalha um evento por 15 linhas). **Nunca logar segredo nem conteúdo de
+  reunião**: nome da chave sim, valor não; tamanho do transcript sim, texto não. Rotaciona em 2 MB
+  guardando um arquivo. Antes de `exit()` chamar `Log.flush()`, senão a linha que diz como terminou
+  se perde na fila
+- Falha que o `Backfill` vai reter **não** abre alerta modal: o menu vai para `Phase.retrying` e o
+  alerta só aparece se as três tentativas se esgotarem (`AppState.backfillGaveUp`). Quem decide é
+  `Notes.problemsWorthAlerting` (função pura, coberta pelo `--selftest`), que separa pelo prefixo
+  `Notes.summaryFailurePrefix`. Em 20/08 o modal disparou no instante em que três novas tentativas
+  tinham acabado de ser agendadas, uma delas deu certo 6 minutos depois, e o alarme nunca foi
+  desfeito: a reunião pareceu perdida o dia todo sem estar. Recuperação agora vira `Phase.recovered`,
+  que diz "Recovered", não só "Saved"
 - O marcador de "falta resumo" é o placeholder `_No notes were generated…`, procurado só acima do
   divisor do transcript (`Notes.pendingSummary`). Se mudar o texto do placeholder, a varredura para
   de achar os arquivos: por isso ele é uma constante única compartilhada com o `markdown()`

@@ -78,7 +78,7 @@ enum Notes {
                 progress("Writing notes…")
                 notes = try await summarize(transcript)
             } catch {
-                problems.append("Note generation failed: \(error.localizedDescription)")
+                problems.append(summaryFailurePrefix + error.localizedDescription)
             }
         }
 
@@ -108,6 +108,9 @@ enum Notes {
         }
 
         try? FileManager.default.removeItem(at: capture.directory)
+        Log.write("wrote \(destination.lastPathComponent)"
+                    + (problems.isEmpty ? " cleanly"
+                       : " with \(problems.count) problem(s): \(problems.joined(separator: "; "))"))
         return (destination, problems)
     }
 
@@ -316,13 +319,39 @@ enum Notes {
         }
     }
 
-    /// Pure: the summarizers that are configured, in the order to try them. Groq leads
-    /// on measured reliability, not preference: Gemini's free tier caps at 20 requests a
-    /// day and left three meetings unsummarized across two days, one of them unnoticed
-    /// for a day. Gemini stays as the fallback, where its far larger context window is
-    /// the safety net for a meeting long enough to overflow Groq. Covered by `--selftest`.
-    static func summaryProviders(_ env: [String: String]) -> [Summarizer] {
-        [.groq, .gemini].filter { !(env[$0.keyName] ?? "").isEmpty }
+    /// The longest transcript worth sending to Groq first.
+    ///
+    /// Groq's `on_demand` tier caps at 8000 tokens per minute, and the cap is checked
+    /// against the whole request, so a long meeting is refused outright with a 413 that
+    /// reads like a size error but is really the rate limit. Measured 2026-08-21 against
+    /// `openai/gpt-oss-120b`: this prompt is ~260 tokens, and real Portuguese meeting
+    /// transcripts ran 4.0-4.2 characters per token (38772 chars -> 9475 tokens;
+    /// 48047 -> 12239). Taking 3.8 as the pessimistic ratio leaves
+    /// (8000 - 260) * 3.8 ≈ 29000 characters.
+    ///
+    /// Deliberately not conservative beyond that. Guessing high costs one 400 ms round
+    /// trip before the chain falls through to Gemini; guessing low spends Gemini's
+    /// 20-requests-a-day quota on a meeting Groq would have taken.
+    static let groqTranscriptLimit = 29_000
+
+    /// Pure: the summarizers that are configured, in the order to try them.
+    ///
+    /// Groq leads on measured reliability, not preference: Gemini's free tier caps at 20
+    /// requests a day and left three meetings unsummarized across two days, one of them
+    /// unnoticed for a day. But Groq cannot take a long meeting at all (see
+    /// `groqTranscriptLimit`), so past that length the order flips and Gemini's far
+    /// larger context window leads instead.
+    ///
+    /// This reorders and never drops: whichever provider cannot lead is still the
+    /// fallback. That is what saved 2026-08-20, when Gemini answered 503 four times
+    /// running — a chain with one provider in it would have had nowhere left to go.
+    /// Covered by `--selftest`.
+    static func summaryProviders(_ env: [String: String],
+                                 transcriptCharacters: Int) -> [Summarizer] {
+        let order: [Summarizer] = transcriptCharacters > groqTranscriptLimit
+            ? [.gemini, .groq]
+            : [.groq, .gemini]
+        return order.filter { !(env[$0.keyName] ?? "").isEmpty }
     }
 
     /// Two independent providers, so an outage on one no longer costs a meeting's
@@ -330,18 +359,30 @@ enum Notes {
     /// separates "the note is missing" from "the note is missing and here is why".
     static func summarize(_ transcript: String) async throws -> String {
         let env = Env.load()
-        let providers = summaryProviders(env)
-        guard !providers.isEmpty else { throw Failure.noLLMKey }
+        let providers = summaryProviders(env, transcriptCharacters: transcript.count)
+        Log.write("summarize: \(transcript.count) characters, "
+                    + "providers \(providers.map(\.rawValue).joined(separator: " then "))")
+        guard !providers.isEmpty else {
+            Log.write("summarize: no API key configured, skipping")
+            throw Failure.noLLMKey
+        }
 
         var failures: [String] = []
         for provider in providers {
             let key = env[provider.keyName] ?? ""
             do {
+                let notes: String
                 switch provider {
-                case .groq: return try await summarizeViaGroq(transcript, key: key, env: env)
-                case .gemini: return try await summarizeViaGemini(transcript, key: key, env: env)
+                case .groq: notes = try await summarizeViaGroq(transcript, key: key, env: env)
+                case .gemini: notes = try await summarizeViaGemini(transcript, key: key, env: env)
                 }
+                Log.write("summarize: \(provider.rawValue) succeeded")
+                return notes
             } catch {
+                // Logged per provider because the throw below is only reached when every
+                // one of them failed: a Groq failure that Gemini then covered used to
+                // leave no trace at all, which is exactly what made 2026-08-20 opaque.
+                Log.write("summarize: \(provider.rawValue) failed — \(error.localizedDescription)")
                 failures.append("\(provider.rawValue): \(error.localizedDescription)")
             }
         }
@@ -419,6 +460,23 @@ enum Notes {
     /// Written in place of the notes when summarization produced nothing. Doubles as the
     /// marker the backfill sweep looks for, so the two must stay in sync.
     static let noNotesPlaceholder = "_No notes were generated. The transcript is below._"
+
+    /// Marks the one problem the backfill sweep can still undo. `AppState` sorts the
+    /// problem list on this to decide whether a failure is worth an alert or whether the
+    /// retry schedule already has it covered, so the two must stay in sync — the same
+    /// contract `noNotesPlaceholder` has with `pendingSummary`.
+    static let summaryFailurePrefix = "Note generation failed: "
+
+    /// Pure: the problems worth interrupting the user for, given whether the note is
+    /// still missing its summary and therefore already queued for retry.
+    ///
+    /// A failed summary is withheld only while the backfill owns it. Everything else —
+    /// a failed mix, a rescued .caf, a note that had to land on the Desktop — is
+    /// permanent and gets said out loud at once. Covered by `--selftest`.
+    static func problemsWorthAlerting(_ problems: [String], summaryPending: Bool) -> [String] {
+        guard summaryPending else { return problems }
+        return problems.filter { !$0.hasPrefix(summaryFailurePrefix) }
+    }
 
     /// Separates the notes from the transcript. `split` and `pendingSummary` both key
     /// off it, so it lives in one place.
@@ -531,17 +589,23 @@ enum Notes {
             }
         }
 
+        let host = request.url?.host() ?? "?"
         for attempt in 1..<attempts {
             do {
                 let (data, response) = try await send()
                 if let http = response as? HTTPURLResponse, transientStatuses.contains(http.statusCode) {
                     let retryAfter = http.value(forHTTPHeaderField: "Retry-After").flatMap(Double.init)
-                    try await Task.sleep(for: .seconds(min(retryAfter ?? Double(1 << attempt), 60)))
+                    let backoff = min(retryAfter ?? Double(1 << attempt), 60)
+                    Log.write("\(host): HTTP \(http.statusCode) on attempt \(attempt)/\(attempts), "
+                                + "retrying in \(Int(backoff))s")
+                    try await Task.sleep(for: .seconds(backoff))
                     continue
                 }
                 try checkHTTP(response, data)
                 return data
             } catch where isTransient(error) {
+                Log.write("\(host): \(error.localizedDescription) on attempt \(attempt)/\(attempts), "
+                            + "retrying in \(1 << attempt)s")
                 try await Task.sleep(for: .seconds(1 << attempt))
             }
         }
