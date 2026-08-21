@@ -38,12 +38,19 @@ enum Backfill {
     /// rather than stacking a second schedule on top of the first.
     static func scheduleRetries() {
         scheduled?.cancel()
+        let schedule = retryDelays.map { "+\(Int($0 / 60))" }.joined(separator: "/")
+        Log.write("backfill: scheduling retries at \(schedule) min")
         scheduled = Task {
             for delay in retryDelays {
                 try? await Task.sleep(for: .seconds(delay))
                 if Task.isCancelled { return }
                 if await sweep().isComplete { return }
             }
+            // Every pass is spent and something is still unsummarized. Saying so is the
+            // whole point of having deferred the alert at recording time: silence here
+            // would leave the note broken with nobody told.
+            Log.write("backfill: retries exhausted, notes still pending")
+            AppState.shared.backfillGaveUp()
         }
     }
 
@@ -56,16 +63,21 @@ enum Backfill {
         sweeping = true
         defer { sweeping = false }
 
+        let pending = pendingFiles()
+        guard !pending.isEmpty else { return Result() }
+        Log.write("backfill: \(pending.count) note(s) pending — "
+                    + pending.map(\.lastPathComponent).joined(separator: ", "))
+
         var result = Result()
-        for file in pendingFiles() {
+        for file in pending {
             do {
                 try await Notes.regenerate(file: file)
-                NSLog("alpiste: backfilled notes for \(file.lastPathComponent)")
+                Log.write("backfill: filled in \(file.lastPathComponent)")
                 AppState.shared.noteBackfilled(file)
                 result.filled.append(file)
             } catch {
-                NSLog("alpiste: backfill failed for \(file.lastPathComponent): "
-                        + error.localizedDescription)
+                Log.write("backfill: failed for \(file.lastPathComponent) — "
+                            + error.localizedDescription)
                 result.failed.append((file, error.localizedDescription))
             }
         }
