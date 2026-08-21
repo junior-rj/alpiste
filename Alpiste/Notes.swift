@@ -323,11 +323,18 @@ enum Notes {
     ///
     /// Groq's `on_demand` tier caps at 8000 tokens per minute, and the cap is checked
     /// against the whole request, so a long meeting is refused outright with a 413 that
-    /// reads like a size error but is really the rate limit. Measured 2026-08-21 against
-    /// `openai/gpt-oss-120b`: this prompt is ~260 tokens, and real Portuguese meeting
-    /// transcripts ran 4.0-4.2 characters per token (38772 chars -> 9475 tokens;
-    /// 48047 -> 12239). Taking 3.8 as the pessimistic ratio leaves
-    /// (8000 - 260) * 3.8 ≈ 29000 characters.
+    /// reads like a size error but is really the rate limit.
+    ///
+    /// Measured 2026-08-21 against `openai/gpt-oss-120b`, on a real Portuguese meeting
+    /// transcript, one probe per 70 seconds so the rolling window could not carry over:
+    /// 20000 chars -> 5088 tokens, 25000 -> 6254, 29000 -> 7120. That is 4.43 characters
+    /// per token at the margin over 572 tokens of fixed prompt and chat overhead, which
+    /// puts the real break-even at ~32900 characters. 29000 keeps 880 tokens of headroom
+    /// for a denser meeting than the one measured.
+    ///
+    /// Measure with a 200's `usage.prompt_tokens`, never with the 413 body: its
+    /// "Requested N" is counted against the rolling minute, so probes fired back to back
+    /// inflate each other (the same payload read 9475 one day and 11449 the next).
     ///
     /// Deliberately not conservative beyond that. Guessing high costs one 400 ms round
     /// trip before the chain falls through to Gemini; guessing low spends Gemini's

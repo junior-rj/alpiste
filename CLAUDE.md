@@ -77,8 +77,12 @@ Produto próprio
   `on_demand` corta em **8.000 tokens por minuto** contando a requisição inteira, e devolve
   **HTTP 413** ("Request too large … on tokens per minute (TPM): Limit 8000, Requested N"), não
   429. O `gpt-oss-120b` tem 131k de contexto, então olhar só o modelo não explica a recusa.
-  Medido em 21/08: transcript de reunião em português roda a ~4,0 chars/token (38.772 chars =
-  9.475 tokens; 48.047 = 12.239), o prompt custa ~260 tokens, daí o limiar de 29.000 chars.
+  Medido em 21/08 com sondas espaçadas de 70s: 20.000 chars = 5.088 tokens, 25.000 = 6.254,
+  29.000 = 7.120. Dá 4,43 chars/token na margem sobre 572 tokens de overhead fixo, e ruptura
+  real em ~32.900 chars; o limiar de 29.000 guarda 880 tokens de folga. **Medir sempre pelo
+  `usage.prompt_tokens` de um 200, nunca pelo corpo do 413**: o "Requested N" dele conta contra
+  a janela móvel do minuto, então sondas em sequência se inflam (o mesmo payload leu 9.475 num
+  dia e 11.449 no outro).
   **Não mandar `max_tokens`**: o Groq soma o teto de saída ao cálculo de TPM, então declarar
   `max_tokens=2000` num payload de 8.121 tokens pediu 10.121 e piorou a recusa
 - O catálogo do Groq muda rápido e a página de marketing atrasa em relação à API (em 19/08 a
