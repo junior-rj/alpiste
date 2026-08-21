@@ -10,7 +10,9 @@ Produto próprio
 - App novo em SwiftUI, macOS 15+ (piso do `SCStreamConfiguration.captureMicrophone`)
 - Captura de áudio da reunião (sistema + microfone) via ScreenCaptureKit
 - Transcrição local com whisper.cpp (modelo medium), API só como fallback
-- Notas geradas por IA a partir da transcrição (Gemini free tier)
+- Notas geradas por IA a partir da transcrição, por **dois provedores em cadeia** cuja ordem
+  depende do tamanho do transcript: Groq lidera até 29.000 chars, Gemini acima disso, e o que
+  não lidera fica de reserva. Detalhe e motivo em "Regras específicas"
 - Saída em `~/MeetingNotes/YYYY-MM-DD-HHMM.md` + `.m4a` ao lado
 
 ## Contexto
@@ -24,7 +26,7 @@ Produto próprio
 ## Arquivos importantes
 - project.yml — definição do projeto (rodar `xcodegen` após mudar)
 - Alpiste/Recorder.swift — SCStream, escreve system.caf e mic.caf separados
-- Alpiste/Notes.swift — mix ffmpeg, whisper, Gemini/Groq, escrita do markdown; `Tool` e `Env`
+- Alpiste/Notes.swift — mix ffmpeg, whisper, Groq/Gemini, escrita do markdown; `Tool` e `Env`
 - Alpiste/Backfill.swift — varredura que regenera resumos que falharam (launch e agendada)
 - Alpiste/Log.swift — registro persistente em `~/Library/Logs/Alpiste/alpiste.log`
 - Alpiste/AlpisteApp.swift — MenuBarExtra, máquina de estados, permissões, `SelfTest`

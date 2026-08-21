@@ -44,7 +44,7 @@ GROQ_API_KEY=
 # OPENAI_API_KEY=
 EOF
   chmod 600 "$HOME/.alpiste/.env"
-  echo "==> Created $HOME/.alpiste/.env, add your GEMINI_API_KEY to it"
+  echo "==> Created $HOME/.alpiste/.env, add your GROQ_API_KEY to it"
 fi
 
 echo

@@ -11,7 +11,9 @@ the transcript into notes, and even that is optional.
 1. Records system audio and your microphone with ScreenCaptureKit.
 2. Mixes them into one `.m4a` with ffmpeg.
 3. Transcribes with a local whisper.cpp `medium` model.
-4. Sends the transcript to Gemini for a 5-bullet summary, decisions, and action items.
+4. Sends the transcript out for a 5-bullet summary, decisions, and action items. Two
+   providers are tried in order, and the order depends on transcript size: Groq leads up
+   to 29,000 characters, Gemini above that. Whichever does not lead stays as the backup.
 5. Writes `~/MeetingNotes/YYYY-MM-DD-HHMM.md` with the notes on top, the full transcript
    below a divider, and the audio alongside as `YYYY-MM-DD-HHMM.m4a`. The audio line also
    names which sources actually got captured (`system audio`, `microphone`, or both), and
@@ -58,13 +60,25 @@ call and not your own voice.
 `~/.alpiste/.env`, created by `setup.sh`. Real environment variables override the file.
 
 ```sh
-GEMINI_API_KEY=...        # notes generation, free tier at https://aistudio.google.com/apikey
+# Notes generation, first choice. Free tier: https://console.groq.com/keys
+# Also transcribes when the local whisper model is missing.
+GROQ_API_KEY=...
+# GROQ_MODEL=             # defaults to openai/gpt-oss-120b
+
+# Notes generation, fallback when Groq fails, and first choice above 29,000 characters.
+# Free tier: https://aistudio.google.com/apikey. Capped at 20 requests a day, which is why
+# it is second, but its context window is far larger.
+# GEMINI_API_KEY=
 # GEMINI_MODEL=           # defaults to gemini-flash-latest
 
-# Transcription fallback. Only used when the local model is missing.
-# GROQ_API_KEY=
+# Optional transcription fallback. Only used when the local model is missing.
 # OPENAI_API_KEY=
 ```
+
+Groq's `on_demand` tier caps at 8,000 tokens per minute and refuses an oversized request
+with **HTTP 413**, not 429, which reads like a payload limit without being one. That cap,
+not the model's 131k context window, is what puts the 29,000-character threshold where it
+is.
 
 The path is absolute and fixed rather than relative to this repo, because the `.app` needs
 to find it from wherever you install it.
@@ -72,8 +86,9 @@ to find it from wherever you install it.
 ## Offline
 
 With `ggml-medium.bin` in place, transcription never touches the network. Leave
-`GEMINI_API_KEY` empty (or just stay offline) and you still get a complete file with the
-full transcript; it simply notes that no summary was generated.
+both API keys empty (or just stay offline) and you still get a complete file with the
+full transcript; it simply notes that no summary was generated. That applies to both
+keys: a summary needs at least one of them.
 
 The local model always wins, but only while it keeps working: if whisper-cli crashes or
 the model file is corrupt, transcription falls back to the API the same as if the model
@@ -82,8 +97,8 @@ were missing, rather than losing the transcript.
 If a step fails, the meeting is still saved. The markdown gets written with whatever
 succeeded plus a note about what broke, and the audio is always kept — the raw `.caf`
 files are rescued next to the `.md` if even the mixing step fails. Network calls to
-Gemini and the transcription API retry with backoff on rate limits and transient errors
-before giving up.
+the notes providers and the transcription API retry with backoff on rate limits and
+transient errors before giving up.
 
 ## Recovery
 
@@ -92,8 +107,15 @@ Alpiste --regenerate ~/MeetingNotes/2026-07-31-2214.md
 ```
 
 Re-runs summarization on an already-written note file, in place, keeping its transcript.
-The path to reach for when the LLM was down (or `GEMINI_API_KEY` wasn't set yet) at
-recording time.
+
+You rarely need it: a recording that ends without notes schedules its own retries, and the
+alert is deferred until those passes are spent, so a summary that recovers on its own never
+interrupts you. Reach for `--regenerate` when the retries gave up, or when no notes key was
+set at recording time.
+
+What the app did is on disk at `~/Library/Logs/Alpiste/alpiste.log` (rotating at 2 MB, one
+old file kept), reachable from the menu bar. It never records a key value or meeting
+content, so it can be handed over as-is.
 
 ## Checks
 
