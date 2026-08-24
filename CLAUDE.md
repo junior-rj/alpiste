@@ -146,6 +146,12 @@ Produto próprio
   continua ativo, em vez de ser cortada. Sem evento casado, para com 5 min de mic ocioso; com
   evento casado o ocioso vira 15 min, generoso de propósito para que um trecho longo no mudo
   nunca corte reunião viva. `Stop Recording` na mão sempre vence
+- Ler o calendário exige a entitlement `com.apple.security.personal-information.calendars`.
+  O hardened runtime barra acesso a dados pessoais sem ela **mesmo fora do sandbox**, igual ao
+  microfone, e barra **em silêncio**: em 24/08 o `requestFullAccessToEvents` devolveu false na
+  hora, nenhum diálogo apareceu e o status ficou em `notDetermined`, o que parecia recusa do
+  usuário. Tratar só a permissão de TCC não basta; a camada de assinatura vem antes. Conferir
+  com `codesign -d --entitlements - /Applications/Alpiste.app`
 - Permissão de calendário tem **três estados, não dois** (`MeetingCalendar.Access`, mapeamento
   puro coberto pelo `--selftest`): concedida, nunca perguntada, e bloqueada. Um booleano junta
   os dois últimos e foi o que produziu, em 24/08, um item de menu que mandava o usuário para o
