@@ -48,7 +48,9 @@ microphone. A meeting that runs past its scheduled end is extended in ten-minute
 rather than being cut off, and **Stop Recording** always wins.
 
 Calendar access is requested the first time you switch the feature on, never at launch.
-Declining costs you the title and the scheduled stop; everything else still works.
+Declining costs you the title and the scheduled stop; everything else still works, and the
+menu then shows **No Calendar Access — Untitled Notes**, which opens the right Settings
+pane. macOS only ever shows that dialog once, so a refusal can only be undone there.
 
 ## Install
 

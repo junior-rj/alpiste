@@ -83,6 +83,13 @@ struct AlpisteApp: App {
                 get: { state.autoStartOnMeetings },
                 set: { state.setAutoStartOnMeetings($0) }))
 
+            // Recording still works without the calendar, so this is a note, not an alarm.
+            if state.autoStartOnMeetings, !state.meetingCalendarAvailable {
+                Button("No Calendar Access — Untitled Notes") {
+                    MeetingCalendar.openSystemSettings()
+                }
+            }
+
             if let last = state.lastNote {
                 Button("Open \(last.lastPathComponent)") { NSWorkspace.shared.open(last) }
             }
@@ -309,6 +316,11 @@ final class AppState {
     /// things to opt into, not things to discover already happening.
     private(set) var autoStartOnMeetings = UserDefaults.standard.bool(forKey: autoStartKey)
 
+    /// Whether the calendar half of the watcher is usable. Without it the feature still
+    /// detects and records calls; it just cannot title them or know when they end, which is
+    /// worth saying in the menu rather than only in the log.
+    private(set) var meetingCalendarAvailable = false
+
     func setAutoStartOnMeetings(_ enabled: Bool) {
         autoStartOnMeetings = enabled
         UserDefaults.standard.set(enabled, forKey: Self.autoStartKey)
@@ -317,14 +329,16 @@ final class AppState {
             return
         }
         MeetingMonitor.start()
-        // Asked only now, and only once: a denial costs the title and the auto-stop, not
-        // the feature, so there is nothing to warn about.
-        Task { await MeetingCalendar.requestAccess() }
+        // Asked only now, never at launch: a denial costs the title and the scheduled stop,
+        // not the feature itself.
+        Task { meetingCalendarAvailable = await MeetingCalendar.requestAccess() }
     }
 
     /// Resumes watching at launch when the feature was left on.
     func resumeMeetingWatcherIfEnabled() {
         guard autoStartOnMeetings else { return }
+        meetingCalendarAvailable = MeetingCalendar.isAuthorized
+        Log.write("meeting calendar: \(MeetingCalendar.statusDescription)")
         MeetingMonitor.start()
     }
 

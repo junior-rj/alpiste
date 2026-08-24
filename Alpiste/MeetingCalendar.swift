@@ -1,3 +1,4 @@
+import AppKit
 import EventKit
 import Foundation
 
@@ -30,6 +31,19 @@ enum MeetingCalendar {
             accessGranted = true
             return true
         }
+        // macOS shows the dialog once and never again. Calling `requestFullAccessToEvents`
+        // after a refusal returns false without asking anyone anything, so saying "access
+        // not granted" would hide the fact that only System Settings can undo it.
+        guard EKEventStore.authorizationStatus(for: .event) == .notDetermined else {
+            accessGranted = false
+            Log.write("meeting calendar: access was refused earlier — "
+                        + "only System Settings can grant it now")
+            return false
+        }
+        // This app has no Dock icon (LSUIElement), so without pulling it forward the
+        // permission dialog can open behind the meeting window and never be answered —
+        // which is what happened on 2026-08-24, leaving the watcher silently degraded.
+        NSApp.activate(ignoringOtherApps: true)
         do {
             accessGranted = try await store.requestFullAccessToEvents()
         } catch {
@@ -38,6 +52,28 @@ enum MeetingCalendar {
         }
         Log.write("meeting calendar: access \(accessGranted ? "granted" : "not granted")")
         return accessGranted
+    }
+
+    /// Says which of the several ways "no calendar" can happen is the one in force. Written
+    /// to the log at launch because the difference decides what the user has to do: wait for
+    /// the dialog, or go to System Settings.
+    static var statusDescription: String {
+        switch EKEventStore.authorizationStatus(for: .event) {
+        case .fullAccess: "available"
+        case .notDetermined: "not asked yet"
+        case .denied: "refused — grant it in System Settings > Privacy & Security > Calendars"
+        case .restricted: "restricted by policy"
+        case .writeOnly: "write-only, which is not enough to read events"
+        @unknown default: "unknown"
+        }
+    }
+
+    /// Opens the pane where a refusal can be undone, since the dialog will not come back.
+    static func openSystemSettings() {
+        guard let url = URL(string:
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars")
+        else { return }
+        NSWorkspace.shared.open(url)
     }
 
     /// The meeting happening right now, or nil. Never throws and never blocks on permission:

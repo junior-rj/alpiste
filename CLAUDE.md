@@ -146,6 +146,12 @@ Produto próprio
   continua ativo, em vez de ser cortada. Sem evento casado, para com 5 min de mic ocioso; com
   evento casado o ocioso vira 15 min, generoso de propósito para que um trecho longo no mudo
   nunca corte reunião viva. `Stop Recording` na mão sempre vence
+- O diálogo de permissão do Calendário aparece **uma vez só**. Pedir de novo depois de uma
+  recusa devolve false sem perguntar nada a ninguém, então `requestAccess` checa
+  `authorizationStatus` antes e diz no log que só os Ajustes do Sistema resolvem. E como o app
+  é `LSUIElement`, o pedido chama `NSApp.activate` antes: em 24/08 o diálogo abriu atrás da
+  janela e ficou sem resposta, deixando o watcher degradado em silêncio. Mesma pegadinha que o
+  painel "About" já tratava
 - **Nunca logar o título da reunião**: é conteúdo de reunião e a regra do log já proíbe. O log
   registra a decisão ("calendar event matched"), o bundle ID do app que segurou o mic, e tempos
 - `Alpiste --prompt-demo` mostra o painel flutuante e diz qual botão foi clicado, sem gravar
