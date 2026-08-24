@@ -19,9 +19,34 @@ enum MeetingCalendar {
     private static let store = EKEventStore()
     private static var accessGranted = false
 
-    static var isAuthorized: Bool {
-        EKEventStore.authorizationStatus(for: .event) == .fullAccess
+    /// Three states, because a boolean cannot tell the two failures apart and they need
+    /// opposite actions from the user: one is answered by a dialog this app can raise, the
+    /// other only by System Settings. Collapsing them is what produced a menu item that
+    /// sent the user to a pane where Alpiste was not even listed.
+    enum Access: Equatable {
+        case available
+        /// The dialog has never been answered, so asking again still works.
+        case notAsked
+        /// Refused or forbidden. macOS will not ask again; only System Settings can undo it.
+        case blocked
     }
+
+    /// Pure, and deliberately `nonisolated`: it touches nothing shared, and `--selftest`
+    /// calls it from off the main actor.
+    nonisolated static func access(for status: EKAuthorizationStatus) -> Access {
+        switch status {
+        case .fullAccess: .available
+        case .notDetermined: .notAsked
+        // `writeOnly` counts as blocked: it cannot read events, and no further prompt will
+        // upgrade it.
+        case .denied, .restricted, .writeOnly: .blocked
+        @unknown default: .blocked
+        }
+    }
+
+    static var access: Access { access(for: EKEventStore.authorizationStatus(for: .event)) }
+
+    static var isAuthorized: Bool { access == .available }
 
     /// Asks for calendar access if it has not been asked for yet. Returns whether the
     /// watcher can use the calendar; a false is a degraded mode, not a failure.
@@ -34,7 +59,7 @@ enum MeetingCalendar {
         // macOS shows the dialog once and never again. Calling `requestFullAccessToEvents`
         // after a refusal returns false without asking anyone anything, so saying "access
         // not granted" would hide the fact that only System Settings can undo it.
-        guard EKEventStore.authorizationStatus(for: .event) == .notDetermined else {
+        guard access == .notAsked else {
             accessGranted = false
             Log.write("meeting calendar: access was refused earlier — "
                         + "only System Settings can grant it now")
@@ -58,13 +83,10 @@ enum MeetingCalendar {
     /// to the log at launch because the difference decides what the user has to do: wait for
     /// the dialog, or go to System Settings.
     static var statusDescription: String {
-        switch EKEventStore.authorizationStatus(for: .event) {
-        case .fullAccess: "available"
-        case .notDetermined: "not asked yet"
-        case .denied: "refused — grant it in System Settings > Privacy & Security > Calendars"
-        case .restricted: "restricted by policy"
-        case .writeOnly: "write-only, which is not enough to read events"
-        @unknown default: "unknown"
+        switch access {
+        case .available: "available"
+        case .notAsked: "not asked yet"
+        case .blocked: "blocked — only System Settings can grant it now"
         }
     }
 

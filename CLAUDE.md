@@ -146,6 +146,15 @@ Produto próprio
   continua ativo, em vez de ser cortada. Sem evento casado, para com 5 min de mic ocioso; com
   evento casado o ocioso vira 15 min, generoso de propósito para que um trecho longo no mudo
   nunca corte reunião viva. `Stop Recording` na mão sempre vence
+- Permissão de calendário tem **três estados, não dois** (`MeetingCalendar.Access`, mapeamento
+  puro coberto pelo `--selftest`): concedida, nunca perguntada, e bloqueada. Um booleano junta
+  os dois últimos e foi o que produziu, em 24/08, um item de menu que mandava o usuário para o
+  painel de Calendários dos Ajustes num caso em que o Alpiste sequer estava listado lá, porque
+  nunca tinha sido perguntado. Cada estado pede uma ação oposta: um diálogo que o app ainda
+  pode levantar, ou os Ajustes do Sistema. O `writeOnly` conta como bloqueado, já que não lê
+  evento e nenhum prompt o promove
+- O status é relido no tick do watcher, então conceder a permissão nos Ajustes reflete no menu
+  em dois segundos, sem relançar
 - O diálogo de permissão do Calendário aparece **uma vez só**. Pedir de novo depois de uma
   recusa devolve false sem perguntar nada a ninguém, então `requestAccess` checa
   `authorizationStatus` antes e diz no log que só os Ajustes do Sistema resolvem. E como o app
