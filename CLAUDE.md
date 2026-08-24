@@ -28,6 +28,10 @@ Produto próprio
 - Alpiste/Recorder.swift — SCStream, escreve system.caf e mic.caf separados
 - Alpiste/Notes.swift — mix ffmpeg, whisper, Groq/Gemini, escrita do markdown; `Tool` e `Env`
 - Alpiste/Backfill.swift — varredura que regenera resumos que falharam (launch e agendada)
+- Alpiste/MeetingWatcher.swift — detector de reunião: funções puras de classificação e
+  casamento com o calendário, leitura do CoreAudio, e o `MeetingMonitor` que faz o polling
+- Alpiste/MeetingCalendar.swift — EventKit, só leitura, título e horário de término
+- Alpiste/MeetingPrompt.swift — o painel flutuante Record / Not now
 - Alpiste/Log.swift — registro persistente em `~/Library/Logs/Alpiste/alpiste.log`
 - Alpiste/AlpisteApp.swift — MenuBarExtra, máquina de estados, permissões, `SelfTest`
 - scripts/setup.sh — brew deps + download do ggml-medium.bin + ~/.alpiste/.env
@@ -120,6 +124,39 @@ Produto próprio
 - Check único: `Alpiste.app/Contents/MacOS/Alpiste --selftest` (assíncrono; roda ffmpeg de verdade no mixer)
 - "About Alpiste" no menu chama o painel nativo do macOS (`NSApp.orderFrontStandardAboutPanel`), que lê
   nome/versão/copyright direto do Info.plist. Sem tela custom
+- **Auto-start de reunião**: o gatilho é **áudio, não calendário**. O CoreAudio expõe, desde o
+  macOS 14.4, quais processos seguram o microfone (`kAudioHardwarePropertyProcessObjectList`,
+  `kAudioProcessPropertyIsRunningInput`, `kAudioProcessPropertyBundleID`), sem permissão
+  nenhuma além das que o app já tem. Evento de calendário em que o usuário não entrou não pode
+  avisar, e reunião não agendada tem que ser pega mesmo assim
+- O casamento é por **prefixo de bundle ID**, nunca por igualdade: quem segura o dispositivo é o
+  processo helper, não o app pai. Medido em 24/08 — uma chamada no Comet aparece como
+  `ai.perplexity.comet.helper` e o renderer do Chrome como `com.google.Chrome.helper`. Comparar
+  com o bundle ID do app não acharia nenhum dos dois
+- A lista negada (`MeetingWatcher.alwaysIgnoredApps`) **não é configurável, de propósito**, e tem
+  duas entradas que sustentam o recurso inteiro: o **Wispr Flow**, que segura o microfone o dia
+  todo para ditado e faria o painel aparecer de dez em dez minutos, e o **próprio Alpiste**, que
+  segura o microfone enquanto grava e realimentaria o detector com a própria captura. Ambos
+  cobertos pelo `--selftest`
+- O calendário é **contexto, não gatilho**: entra depois que o áudio disparou, só para dar o
+  título da nota e o horário de término. Toda falha (sem permissão, sem conta, sem evento) cai
+  em nil e o recurso segue em modo degradado. Permissão pedida **preguiçosamente**, na primeira
+  vez que o toggle é ligado, nunca no launch
+- Parada: `endDate + folga`, mas reunião que estica é **prorrogada em blocos** enquanto o mic
+  continua ativo, em vez de ser cortada. Sem evento casado, para com 5 min de mic ocioso; com
+  evento casado o ocioso vira 15 min, generoso de propósito para que um trecho longo no mudo
+  nunca corte reunião viva. `Stop Recording` na mão sempre vence
+- O diálogo de permissão do Calendário aparece **uma vez só**. Pedir de novo depois de uma
+  recusa devolve false sem perguntar nada a ninguém, então `requestAccess` checa
+  `authorizationStatus` antes e diz no log que só os Ajustes do Sistema resolvem. E como o app
+  é `LSUIElement`, o pedido chama `NSApp.activate` antes: em 24/08 o diálogo abriu atrás da
+  janela e ficou sem resposta, deixando o watcher degradado em silêncio. Mesma pegadinha que o
+  painel "About" já tratava
+- **Nunca logar o título da reunião**: é conteúdo de reunião e a regra do log já proíbe. O log
+  registra a decisão ("calendar event matched"), o bundle ID do app que segurou o mic, e tempos
+- `Alpiste --prompt-demo` mostra o painel flutuante e diz qual botão foi clicado, sem gravar
+  nada. Existe porque a única alternativa para ver o painel renderizar era esperar uma reunião
+  de verdade
 - Fallback do Gemini avaliado em 2026-08-18 e descartado: o Foundation Models da Apple (on-device,
   `import FoundationModels`) tem janela de contexto de só 4096 tokens (confirmado no `.swiftinterface`
   do SDK), insuficiente pra reunião longa — serviria no máximo de fallback pra reunião curta. Decisão:

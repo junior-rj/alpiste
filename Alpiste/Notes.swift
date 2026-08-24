@@ -16,8 +16,12 @@ enum Notes {
 
     /// Runs the full pipeline. Never throws: whatever succeeds gets written to disk.
     /// A failed API call must never cost the user their recording.
+    /// `title` is the calendar title when the meeting watcher matched an event; the
+    /// timestamp heading is used when it is nil. Only the heading changes: the file name
+    /// stays the timestamp, so no sanitising rule has to be invented for it.
     static func process(_ capture: Recorder.Capture,
                         startedAt: Date,
+                        title: String? = nil,
                         progress: @Sendable (String) -> Void = { _ in })
         async -> (file: URL?, problems: [String]) {
         var problems: [String] = []
@@ -85,7 +89,7 @@ enum Notes {
         // 4. Always write the file.
         let captured = [capture.systemAudio != nil ? "system audio" : nil,
                         capture.microphone != nil ? "microphone" : nil].compactMap { $0 }
-        let markdown = Self.markdown(title: Self.title(startedAt),
+        let markdown = Self.markdown(title: title ?? Self.title(startedAt),
                                      notes: notes,
                                      transcript: transcript,
                                      audioFile: audioFile?.lastPathComponent,
@@ -743,7 +747,9 @@ enum Env {
     static func load() -> [String: String] {
         var values = parse((try? String(contentsOf: file, encoding: .utf8)) ?? "")
         for key in ["GEMINI_API_KEY", "GEMINI_MODEL", "GROQ_API_KEY", "GROQ_MODEL",
-                    "GROQ_WHISPER_MODEL", "OPENAI_API_KEY", "OPENAI_WHISPER_MODEL"] {
+                    "GROQ_WHISPER_MODEL", "OPENAI_API_KEY", "OPENAI_WHISPER_MODEL",
+                    "MEETING_APPS", "MEETING_DEBOUNCE_SECONDS", "MEETING_STOP_GRACE_MINUTES",
+                    "MEETING_OVERRUN_MINUTES"] {
             if let override = ProcessInfo.processInfo.environment[key], !override.isEmpty {
                 values[key] = override
             }

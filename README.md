@@ -24,6 +24,34 @@ While a recording is in progress, its raw files live in
 `~/Library/Application Support/Alpiste/captures/`, not in the system temp directory, so a
 multi-hour meeting survives disk pressure.
 
+## Auto-start on meetings
+
+Off by default. Turn on **Auto-start on Meetings** in the menu and Alpiste offers to record
+when it notices you have joined a call: a small floating panel with **Record** and **Not
+now**, which times out after 90 seconds and never steals focus.
+
+The trigger is audio, not the calendar. CoreAudio reports which processes hold the
+microphone, so an event you never joined stays quiet and an unscheduled call is still
+caught. A meeting app has to hold the microphone continuously for 20 seconds before the
+panel appears, which is what keeps a voice note or a dictation blip from raising it.
+
+Two apps are never treated as meetings, whatever the configuration says: **Wispr Flow**,
+which holds the microphone all day for dictation, and **Alpiste itself**, which holds it
+while recording and would otherwise trigger on its own capture. Matching is by bundle ID
+prefix because the process that actually holds the device is a helper: a call in Chrome
+shows up as `com.google.Chrome.helper`.
+
+The calendar is context, not trigger. If Calendar.app has an event running when the panel
+appears, its title becomes the note's heading and its end time schedules the stop. Without
+one, the recording stops five minutes after the last meeting app lets go of the
+microphone. A meeting that runs past its scheduled end is extended in ten-minute blocks
+rather than being cut off, and **Stop Recording** always wins.
+
+Calendar access is requested the first time you switch the feature on, never at launch.
+Declining costs you the title and the scheduled stop; everything else still works, and the
+menu then shows **No Calendar Access — Untitled Notes**, which opens the right Settings
+pane. macOS only ever shows that dialog once, so a refusal can only be undone there.
+
 ## Install
 
 ```sh
@@ -47,6 +75,7 @@ Both are requested on your first **Start Recording**.
 |---|---|---|
 | **Screen Recording** | The only supported way to capture system audio on macOS. No video is ever written; the app captures a 2x2 pixel surface and throws every frame away. | System Settings > Privacy & Security > Screen Recording |
 | **Microphone** | Records your side of the conversation. | System Settings > Privacy & Security > Microphone |
+| **Calendars** | Optional, and only asked for when you turn on Auto-start on Meetings. Titles the note and schedules the stop. Nothing is ever written to your calendar. | System Settings > Privacy & Security > Calendars |
 
 **Screen Recording only takes effect after you quit and reopen the app.** macOS applies it
 at launch, so granting it mid-session silently does nothing. Alpiste tells you this when it
@@ -70,6 +99,13 @@ GROQ_API_KEY=...
 # it is second, but its context window is far larger.
 # GEMINI_API_KEY=
 # GEMINI_MODEL=           # defaults to gemini-flash-latest
+
+# Meeting auto-start, all optional. Extra bundle ID prefixes to treat as meeting apps,
+# comma separated; the deny list (Wispr Flow, Alpiste) cannot be overridden.
+# MEETING_APPS=
+# MEETING_DEBOUNCE_SECONDS=     # defaults to 20
+# MEETING_STOP_GRACE_MINUTES=   # defaults to 5
+# MEETING_OVERRUN_MINUTES=      # defaults to 10
 
 # Optional transcription fallback. Only used when the local model is missing.
 # OPENAI_API_KEY=
@@ -125,10 +161,19 @@ Alpiste.app/Contents/MacOS/Alpiste --selftest
 
 Asserts the `.env` parser, the markdown assembly and its `--regenerate` round-trip
 (including the degraded no-notes path), filename collision handling, the
-calendar-independent timestamp format, and that `ffmpeg` resolves without a login shell
-PATH. It also actually runs the ffmpeg mixer twice, on synthetic tones, once for a single
+calendar-independent timestamp format, the meeting watcher's classifier and calendar
+matching (including that Wispr Flow and Alpiste itself are never mistaken for a call), and
+that `ffmpeg` resolves without a login shell PATH. It also actually runs the ffmpeg mixer twice, on synthetic tones, once for a single
 source and once for system + mic, since a filtergraph regression is the kind of failure
 only a real invocation catches. Exits non-zero on failure.
+
+To see the meeting prompt without waiting for a real call:
+
+```sh
+Alpiste.app/Contents/MacOS/Alpiste --prompt-demo
+```
+
+It shows the panel, prints which button you clicked, and records nothing.
 
 To exercise transcription without recording anything, whisper-cpp ships a sample:
 

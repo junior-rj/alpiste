@@ -79,6 +79,17 @@ struct AlpisteApp: App {
                     .disabled(state.isBusy)
             }
 
+            Toggle("Auto-start on Meetings", isOn: Binding(
+                get: { state.autoStartOnMeetings },
+                set: { state.setAutoStartOnMeetings($0) }))
+
+            // Recording still works without the calendar, so this is a note, not an alarm.
+            if state.autoStartOnMeetings, !state.meetingCalendarAvailable {
+                Button("No Calendar Access — Untitled Notes") {
+                    MeetingCalendar.openSystemSettings()
+                }
+            }
+
             if let last = state.lastNote {
                 Button("Open \(last.lastPathComponent)") { NSWorkspace.shared.open(last) }
             }
@@ -139,6 +150,10 @@ final class AppState {
     /// pipeline finishes saving.
     var pendingTermination = false
 
+    /// The calendar title of the recording underway, when the meeting watcher supplied
+    /// one. Cleared with every stop so a later manual recording cannot inherit it.
+    private var meetingTitle: String?
+
     private var session: Recorder.Session?
     private var startedAt: Date?
     private var ticker: Timer?
@@ -160,11 +175,12 @@ final class AppState {
 
     // MARK: - Recording
 
-    func start() {
+    func start(title: String? = nil) {
         // Set synchronously, before any `await`, so a second click landing before the
         // first `Task` resumes sees `isBusy` and bails instead of starting a second
         // stream that the first session's cleanup would never stop.
         guard !isRecording, !isBusy else { return }
+        meetingTitle = title
         phase = .working("Starting…")
 
         Task {
@@ -216,6 +232,8 @@ final class AppState {
     func stop() {
         guard let session, let startedAt else { return }
         self.session = nil
+        let title = meetingTitle
+        meetingTitle = nil
         stopTicking()
         phase = .working("Mixing audio…")
 
@@ -224,7 +242,8 @@ final class AppState {
         Task {
             let capture = await session.stop()
             // Hops back to the main actor to publish each step of the pipeline.
-            let result = await Notes.process(capture, startedAt: startedAt) { step in
+            let result = await Notes.process(capture, startedAt: startedAt,
+                                             title: title) { step in
                 Log.write("pipeline: \(step)")
                 Task { @MainActor in
                     if case .working = self.phase { self.phase = .working(step) }
@@ -289,6 +308,40 @@ final class AppState {
                 + "Details in \(Log.file.path)")
     }
 
+    // MARK: - Meeting watcher
+
+    private static let autoStartKey = "AutoStartOnMeetings"
+
+    /// Off until asked for. Auto-starting recordings and reading the calendar are both
+    /// things to opt into, not things to discover already happening.
+    private(set) var autoStartOnMeetings = UserDefaults.standard.bool(forKey: autoStartKey)
+
+    /// Whether the calendar half of the watcher is usable. Without it the feature still
+    /// detects and records calls; it just cannot title them or know when they end, which is
+    /// worth saying in the menu rather than only in the log.
+    private(set) var meetingCalendarAvailable = false
+
+    func setAutoStartOnMeetings(_ enabled: Bool) {
+        autoStartOnMeetings = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.autoStartKey)
+        guard enabled else {
+            MeetingMonitor.stop()
+            return
+        }
+        MeetingMonitor.start()
+        // Asked only now, never at launch: a denial costs the title and the scheduled stop,
+        // not the feature itself.
+        Task { meetingCalendarAvailable = await MeetingCalendar.requestAccess() }
+    }
+
+    /// Resumes watching at launch when the feature was left on.
+    func resumeMeetingWatcherIfEnabled() {
+        guard autoStartOnMeetings else { return }
+        meetingCalendarAvailable = MeetingCalendar.isAuthorized
+        Log.write("meeting calendar: \(MeetingCalendar.statusDescription)")
+        MeetingMonitor.start()
+    }
+
     // MARK: - Helpers
 
     private func startTicking(from start: Date) {
@@ -334,7 +387,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Log.startup("launched")
         // Catches notes left unsummarized by an earlier run: the app may well have been
         // quit before its retry schedule had a chance to fire.
+        // Showing the panel needs a live app, so this cannot be handled in `init` with the
+        // other flags. It is the only way to see the prompt render without waiting for a
+        // real call to start.
+        if CommandLine.arguments.contains("--prompt-demo") { Self.promptDemo(); return }
+
         Backfill.sweepAtLaunch()
+        AppState.shared.resumeMeetingWatcherIfEnabled()
+    }
+
+    /// `Alpiste --prompt-demo`: shows the meeting prompt and reports which button was
+    /// clicked, then exits. Records nothing.
+    private static func promptDemo() {
+        print("showing the meeting prompt — click a button, or wait for it to time out")
+        MeetingPrompt.show(subtitle: "Weekly sync with the design team") {
+            print("ok   Record")
+            exit(0)
+        } onDecline: {
+            print("ok   Not now")
+            exit(0)
+        }
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -521,6 +593,96 @@ enum SelfTest {
                "uniqueStem: skips names that are already taken")
         expect(Notes.uniqueStem("y") { _ in false } == "y",
                "uniqueStem: keeps an untaken name as-is")
+
+        // The meeting watcher's classifier. The process CoreAudio reports is a helper, not
+        // the app, so these must match by prefix; measured 2026-08-24 with Comet in a call
+        // showing up as ai.perplexity.comet.helper.
+        expect(MeetingWatcher.classify(bundleID: "com.google.Chrome.helper") == .meeting,
+               "classify: a browser helper counts as its parent browser")
+        expect(MeetingWatcher.classify(bundleID: "ai.perplexity.comet.helper") == .meeting,
+               "classify: the helper name CoreAudio actually reported")
+        expect(MeetingWatcher.classify(bundleID: "com.google.chrome") == .meeting,
+               "classify: bundle IDs match case-insensitively")
+        expect(MeetingWatcher.classify(bundleID: "com.google.ChromeOther") == .unknown,
+               "classify: a prefix only matches on a component boundary")
+        expect(MeetingWatcher.classify(bundleID: "com.apple.Music") == .unknown,
+               "classify: an unrelated app is unknown, not a meeting")
+        // The two that make the feature usable instead of a prompt every few minutes.
+        expect(MeetingWatcher.classify(bundleID: "com.electron.wispr-flow") == .ignored,
+               "classify: Wispr Flow dictation never counts as a meeting")
+        expect(MeetingWatcher.classify(bundleID: "com.sparrow.alpiste") == .ignored,
+               "classify: Alpiste's own capture never counts as a meeting")
+        expect(MeetingWatcher.classify(bundleID: "com.electron.wispr-flow",
+                                       meetingApps: ["com.electron.wispr-flow"]) == .ignored,
+               "classify: the deny list wins over configuration")
+
+        let joined = Date(timeIntervalSince1970: 1_000_000)
+        expect(!MeetingWatcher.shouldPrompt(activeSince: nil, now: joined, suppressed: false),
+               "shouldPrompt: nothing on the microphone raises nothing")
+        expect(!MeetingWatcher.shouldPrompt(activeSince: joined,
+                                            now: joined.addingTimeInterval(19),
+                                            suppressed: false),
+               "shouldPrompt: silent until the debounce has elapsed")
+        expect(MeetingWatcher.shouldPrompt(activeSince: joined,
+                                           now: joined.addingTimeInterval(20),
+                                           suppressed: false),
+               "shouldPrompt: fires once the microphone has been held long enough")
+        expect(!MeetingWatcher.shouldPrompt(activeSince: joined,
+                                            now: joined.addingTimeInterval(600),
+                                            suppressed: true),
+               "shouldPrompt: Not now, or an existing recording, keeps it quiet")
+
+        let onMic = [MeetingWatcher.AudioProcess(bundleID: "com.electron.wispr-flow",
+                                                 isRunningInput: true),
+                     MeetingWatcher.AudioProcess(bundleID: "com.apple.Music",
+                                                 isRunningInput: false),
+                     MeetingWatcher.AudioProcess(bundleID: "com.google.Chrome.helper",
+                                                 isRunningInput: true)]
+        expect(MeetingWatcher.meetingAppOnMicrophone(onMic) == "com.google.Chrome.helper",
+               "meetingAppOnMicrophone: finds the browser past a dictating Wispr Flow")
+        expect(MeetingWatcher.meetingAppOnMicrophone(
+                   [MeetingWatcher.AudioProcess(bundleID: "com.google.Chrome.helper",
+                                                isRunningInput: false)]) == nil,
+               "meetingAppOnMicrophone: playing audio is not holding the microphone")
+
+        func event(_ title: String, _ startOffset: TimeInterval, _ endOffset: TimeInterval,
+                   allDay: Bool = false, details: String = "", attendees: Int = 0)
+            -> MeetingWatcher.CalendarEvent {
+            MeetingWatcher.CalendarEvent(title: title,
+                                         start: joined.addingTimeInterval(startOffset),
+                                         end: joined.addingTimeInterval(endOffset),
+                                         isAllDay: allDay, details: details,
+                                         attendeeCount: attendees)
+        }
+        expect(MeetingWatcher.looksLikeMeeting(
+                   event("x", -60, 600, details: "https://meet.google.com/abc-defg-hij")),
+               "looksLikeMeeting: a conference link is enough")
+        expect(MeetingWatcher.looksLikeMeeting(event("x", -60, 600, attendees: 3)),
+               "looksLikeMeeting: several attendees are enough without a link")
+        expect(!MeetingWatcher.looksLikeMeeting(event("x", -60, 600, attendees: 1)),
+               "looksLikeMeeting: a solo reminder is not a meeting")
+        expect(!MeetingWatcher.looksLikeMeeting(
+                   event("x", -60, 600, allDay: true, details: "zoom.us/j/1")),
+               "looksLikeMeeting: an all-day entry is never the call you just joined")
+
+        let overlapping = [event("earlier", -3600, 3600, attendees: 2),
+                           event("just started", -120, 1800, attendees: 2),
+                           event("later", 1800, 3600, attendees: 2)]
+        expect(MeetingWatcher.meetingEvent(overlapping, at: joined)?.title == "just started",
+               "meetingEvent: overlapping events resolve to the one just joined")
+        expect(MeetingWatcher.meetingEvent([event("done", -7200, -3600, attendees: 2)],
+                                           at: joined) == nil,
+               "meetingEvent: an event that already ended does not match")
+
+        // Joining a call in its last minutes must still produce a usable recording.
+        expect(MeetingWatcher.autoStopDate(eventEnd: joined.addingTimeInterval(1800),
+                                           startedAt: joined)
+                == joined.addingTimeInterval(1800 + 300),
+               "autoStopDate: the calendar end plus a grace period")
+        expect(MeetingWatcher.autoStopDate(eventEnd: joined.addingTimeInterval(60),
+                                           startedAt: joined)
+                == joined.addingTimeInterval(600),
+               "autoStopDate: never stops before the minimum recording length")
 
         expect(Tool.find("ffmpeg") != nil, "tools: ffmpeg found without a login PATH")
 
