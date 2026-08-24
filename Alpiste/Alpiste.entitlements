@@ -5,5 +5,10 @@
 	<!-- Hardened runtime blocks mic access without this, even outside the sandbox. -->
 	<key>com.apple.security.device.audio-input</key>
 	<true/>
+	<!-- Same reason as audio-input, and it fails silently: without this key
+	     requestFullAccessToEvents returns false immediately, no dialog is ever shown, and
+	     the status stays notDetermined, which reads as a refusal the user never made. -->
+	<key>com.apple.security.personal-information.calendars</key>
+	<true/>
 </dict>
 </plist>
