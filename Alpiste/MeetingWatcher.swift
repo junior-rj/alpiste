@@ -274,6 +274,9 @@ enum MeetingMonitor {
         let idleFor = lastMicActivity.map { now.timeIntervalSince($0) } ?? .infinity
 
         let state = AppState.shared
+        // Cheap, and it means granting access in System Settings is reflected in the menu
+        // within a tick instead of at the next launch.
+        state.refreshCalendarStatus()
         if state.isRecording {
             // Recording started from the menu while the panel was still up: the question
             // has been answered, so take it off the screen.

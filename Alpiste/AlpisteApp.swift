@@ -1,4 +1,5 @@
 import AppKit
+import EventKit
 import SwiftUI
 
 @main
@@ -84,9 +85,18 @@ struct AlpisteApp: App {
                 set: { state.setAutoStartOnMeetings($0) }))
 
             // Recording still works without the calendar, so this is a note, not an alarm.
-            if state.autoStartOnMeetings, !state.meetingCalendarAvailable {
-                Button("No Calendar Access — Untitled Notes") {
-                    MeetingCalendar.openSystemSettings()
+            // The two failures need opposite actions: one this app can still resolve with a
+            // dialog, one only System Settings can.
+            if state.autoStartOnMeetings {
+                switch state.meetingCalendarStatus {
+                case .available:
+                    EmptyView()
+                case .notAsked:
+                    Button("Allow Calendar Access…") { state.requestCalendarAccess() }
+                case .blocked:
+                    Button("Calendar Access Blocked — Open Settings") {
+                        MeetingCalendar.openSystemSettings()
+                    }
                 }
             }
 
@@ -319,7 +329,7 @@ final class AppState {
     /// Whether the calendar half of the watcher is usable. Without it the feature still
     /// detects and records calls; it just cannot title them or know when they end, which is
     /// worth saying in the menu rather than only in the log.
-    private(set) var meetingCalendarAvailable = false
+    private(set) var meetingCalendarStatus = MeetingCalendar.Access.notAsked
 
     func setAutoStartOnMeetings(_ enabled: Bool) {
         autoStartOnMeetings = enabled
@@ -331,13 +341,32 @@ final class AppState {
         MeetingMonitor.start()
         // Asked only now, never at launch: a denial costs the title and the scheduled stop,
         // not the feature itself.
-        Task { meetingCalendarAvailable = await MeetingCalendar.requestAccess() }
+        requestCalendarAccess()
+    }
+
+    /// Raises the permission dialog, from the toggle or from the menu item. Safe to call
+    /// when it has already been answered: `requestAccess` returns without asking.
+    func requestCalendarAccess() {
+        Task {
+            await MeetingCalendar.requestAccess()
+            refreshCalendarStatus()
+        }
+    }
+
+    /// Polled by the watcher, so granting access in System Settings updates the menu within
+    /// a couple of seconds instead of waiting for a relaunch. Assigns only on a change, to
+    /// avoid waking the menu's observation on every tick.
+    func refreshCalendarStatus() {
+        let current = MeetingCalendar.access
+        guard current != meetingCalendarStatus else { return }
+        meetingCalendarStatus = current
+        Log.write("meeting calendar: \(MeetingCalendar.statusDescription)")
     }
 
     /// Resumes watching at launch when the feature was left on.
     func resumeMeetingWatcherIfEnabled() {
         guard autoStartOnMeetings else { return }
-        meetingCalendarAvailable = MeetingCalendar.isAuthorized
+        meetingCalendarStatus = MeetingCalendar.access
         Log.write("meeting calendar: \(MeetingCalendar.statusDescription)")
         MeetingMonitor.start()
     }
@@ -615,6 +644,18 @@ enum SelfTest {
         expect(MeetingWatcher.classify(bundleID: "com.electron.wispr-flow",
                                        meetingApps: ["com.electron.wispr-flow"]) == .ignored,
                "classify: the deny list wins over configuration")
+
+        // A boolean here is what sent the user to a Settings pane that did not list the app.
+        expect(MeetingCalendar.access(for: .fullAccess) == .available,
+               "calendar access: full access is usable")
+        expect(MeetingCalendar.access(for: .notDetermined) == .notAsked,
+               "calendar access: never answered means the dialog still works")
+        expect(MeetingCalendar.access(for: .denied) == .blocked,
+               "calendar access: a refusal only System Settings can undo")
+        expect(MeetingCalendar.access(for: .restricted) == .blocked,
+               "calendar access: restricted by policy is blocked, not askable")
+        expect(MeetingCalendar.access(for: .writeOnly) == .blocked,
+               "calendar access: write-only cannot read events and will not be upgraded")
 
         let joined = Date(timeIntervalSince1970: 1_000_000)
         expect(!MeetingWatcher.shouldPrompt(activeSince: nil, now: joined, suppressed: false),
