@@ -42,6 +42,11 @@ GROQ_API_KEY=
 
 # Optional transcription fallback, only used when the local model is missing.
 # OPENAI_API_KEY=
+
+# Language whisper is pinned to, defaults to pt. Deliberately not "auto": whisper
+# detects from the first 30 seconds alone and applies that guess to the whole file,
+# which once turned a 45 minute Portuguese meeting into an English translation.
+# WHISPER_LANGUAGE=pt
 EOF
   chmod 600 "$HOME/.alpiste/.env"
   echo "==> Created $HOME/.alpiste/.env, add your GROQ_API_KEY to it"

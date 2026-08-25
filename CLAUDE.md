@@ -69,6 +69,30 @@ Produto próprio
   via callback e salva o que foi capturado até ali, em vez de deixar a UI travada em "Recording"
 - `Alpiste --regenerate <file.md>`: re-sumariza um .md já salvo, no lugar, reaproveitando o transcript
   (recuperação para quando o LLM falhou ou a chave não estava configurada na hora da gravação)
+- `Alpiste --retranscribe <file.md>`: joga o transcript fora e transcreve de novo a partir do `.m4a`
+  ao lado, depois re-sumariza. É a recuperação que o `--regenerate` **não** dá, porque ele reaproveita
+  o transcript que encontra: transcript estragado pelo decoder continuaria estragado. Só existe porque
+  o `.m4a` nunca foi perdido. Reaproveita o `Notes.mix` com uma fonte só, que é exatamente a conversão
+  "áudio entra, wav 16 kHz mono sai" que o whisper quer, e já é exercida pelo `--selftest`
+- O whisper roda com **`-mc 0` e idioma fixo**, e as duas flags são correção de perda de dados, não
+  ajuste fino. `--max-context` no default (`-1`) faz o whisper.cpp injetar o texto já decodificado
+  como contexto da janela seguinte: um segmento ruim (queda de nível, vozes sobrepostas) se
+  auto-alimenta e o decoder trava repetindo uma frase **até o fim do arquivo**, apagando tudo que
+  vinha depois. Medido em 25/08 sobre o `~/MeetingNotes` inteiro: a reunião de 06/08 (45 min) saiu
+  95% `(speaking in foreign language)` e a de 25/08 perdeu os últimos 3 min; com `-mc 0` as duas
+  transcreveram inteiras e uma reunião que já estava boa saiu igual. O áudio estava intacto nos dois
+  casos, o defeito era só de decodificação
+- `-l auto` é a segunda metade do mesmo estrago e **não** se resolve sozinha: a detecção olha só os
+  primeiros 30 segundos e aplica o palpite ao arquivo todo, então abertura ruidosa traduziu uma
+  reunião inteira em português para o inglês. Fixar só o idioma sem o `-mc 0` apenas traduz a
+  alucinação (testado: 644 de 644 linhas viraram `[multidão conversando]`). Default `pt`, override por
+  `WHISPER_LANGUAGE` no `.env` (`Notes.transcriptionLanguage`, coberta pelo `--selftest`)
+- A perda era **silenciosa**: o .md salvava, o resumo saía plausível, e só faltava metade da reunião.
+  Por isso `Notes.runawayRepetition` (função pura, `--selftest`) marca o problema no .md quando uma
+  linha se repete `Notes.repetitionLimit` vezes seguidas. O limiar de 12 foi medido, não chutado: os
+  transcripts arruinados corriam 80 e 39 linhas, o pior saudável chegou a 8 ("Bom dia." enquanto a
+  reunião enche). A mensagem **nunca cita a linha repetida**, porque `problems` é ecoado no log e
+  conteúdo de reunião não pode ir para lá
 - Resumo tem dois provedores em cadeia, e a ordem **depende do tamanho do transcript**
   (`Notes.summaryProviders`, função pura coberta pelo `--selftest`; se mudar a ordem, mude o teste
   junto e de propósito). Até `Notes.groqTranscriptLimit` (29.000 chars) o **Groq lidera**

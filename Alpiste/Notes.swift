@@ -70,6 +70,7 @@ enum Notes {
                 if transcript.isEmpty {
                     problems.append("Transcription succeeded but produced no text (silent recording?).")
                 }
+                if let looping = runawayRepetition(transcript) { problems.append(looping) }
             } catch {
                 problems.append("Transcription failed: \(error.localizedDescription)")
             }
@@ -215,11 +216,30 @@ enum Notes {
         return (try await transcribeViaAPI(wav), nil)
     }
 
+    /// The language whisper is pinned to. `-l auto` decides from the first 30 seconds
+    /// alone and applies that one guess to the whole file, so a noisy opening turned a
+    /// 45 minute Portuguese meeting into an English translation on 2026-08-06. Override
+    /// with `WHISPER_LANGUAGE` in `~/.alpiste/.env` for meetings in another language;
+    /// `auto` is still accepted there, with the caveat above.
+    static func transcriptionLanguage(_ env: [String: String]) -> String {
+        let value = (env["WHISPER_LANGUAGE"] ?? "").trimmingCharacters(in: .whitespaces)
+        return value.isEmpty ? "pt" : value
+    }
+
     private static func transcribeLocally(_ wav: URL, whisper: URL) async throws -> String {
         let prefix = wav.deletingPathExtension()
+        // -mc 0 turns off text-context carry-over between decode windows. At the default
+        // (-1, unlimited) a single bad segment — a level drop, overlapping voices — feeds
+        // itself back in as context and the decoder locks into repeating one phrase until
+        // the end of the file, destroying every real word after it. Measured 2026-08-25:
+        // a 45 min meeting came out 95% "(speaking in foreign language)" and today's lost
+        // its last 3 minutes; the same audio with -mc 0 transcribed in full, and a meeting
+        // that was already fine came out unchanged. Cross-window context buys tidier
+        // punctuation and is not worth risking a silent total loss.
         // The medium model can take a long time on a long meeting; give it room to finish.
         try await Tool.run(whisper,
-                           ["-m", modelURL.path, "-f", wav.path, "-l", "auto",
+                           ["-m", modelURL.path, "-f", wav.path,
+                            "-l", transcriptionLanguage(Env.load()), "-mc", "0",
                             "-otxt", "-of", prefix.path, "-np"],
                            in: wav.deletingLastPathComponent(),
                            label: "whisper-cli", timeout: 4 * 3600)
@@ -489,9 +509,78 @@ enum Notes {
         return problems.filter { !$0.hasPrefix(summaryFailurePrefix) }
     }
 
+    /// How many identical lines in a row mean the decoder looped rather than the room
+    /// genuinely repeating itself. Measured over every note in ~/MeetingNotes on
+    /// 2026-08-25: the two ruined transcripts ran 80 and 39 lines deep, while the worst
+    /// healthy one reached 8 ("Bom dia." as a meeting fills up). 12 sits clear of both.
+    static let repetitionLimit = 12
+
+    /// Pure: a warning when the transcript shows the runaway repetition that whisper
+    /// falls into, or nil when it looks sane. This is the detector for a failure that
+    /// used to be completely silent — the note still saved, the summary still read
+    /// plausibly, and only the lost half of the meeting was missing. `-mc 0` is the
+    /// fix; this is the alarm for when it happens anyway.
+    ///
+    /// The message deliberately never quotes the repeated line: problems are echoed to
+    /// the log, and meeting content must never land there. Covered by `--selftest`.
+    static func runawayRepetition(_ transcript: String) -> String? {
+        var longest = 0
+        var run = 0
+        var previous: Substring?
+        for line in transcript.split(separator: "\n", omittingEmptySubsequences: false) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { continue }
+            if trimmed[...] == previous {
+                run += 1
+            } else {
+                run = 1
+                previous = trimmed[...]
+            }
+            longest = max(longest, run)
+        }
+        guard longest >= repetitionLimit else { return nil }
+        return "Transcription looped: one line repeats \(longest) times in a row, so speech "
+            + "after that point is probably missing. Re-run it with `Alpiste --retranscribe`."
+    }
+
     /// Separates the notes from the transcript. `split` and `pendingSummary` both key
     /// off it, so it lives in one place.
     static let transcriptDivider = "\n---\n\n## Transcript\n\n"
+
+    /// Pure: the problems blockquote. Shared by the initial write and by
+    /// `--retranscribe` so a recovered note reports trouble in the same shape as a
+    /// fresh one. Covered by `--selftest`.
+    static func problemsBlock(_ problems: [String]) -> String {
+        guard !problems.isEmpty else { return "" }
+        return "> **Alpiste hit some problems:**\n"
+            + problems.map { "> - \($0)\n" }.joined()
+            + "\n"
+    }
+
+    /// Pure: the title and audio lines of a saved note, the parts every rewrite keeps.
+    /// Works whether or not the note has a transcript, because `--retranscribe` has to
+    /// handle a note whose transcription failed outright. Covered by `--selftest`.
+    static func noteHeader(_ markdown: String) -> String? {
+        let above = markdown.range(of: transcriptDivider)
+            .map { String(markdown[..<$0.lowerBound]) } ?? markdown
+        let kept = above.split(separator: "\n").filter {
+            $0.hasPrefix("# ") || $0.hasPrefix("Audio: ")
+        }
+        guard kept.first?.hasPrefix("# ") == true else { return nil }
+        return kept.joined(separator: "\n\n")
+    }
+
+    /// Pure: the recording a saved note points at, so `--retranscribe` can find the
+    /// audio again. Matches the `Audio: ` line `markdown()` writes.
+    /// Covered by `--selftest`.
+    static func audioFileName(inNote markdown: String) -> String? {
+        for line in markdown.split(separator: "\n") where line.hasPrefix("Audio: `") {
+            let rest = line.dropFirst("Audio: `".count)
+            guard let end = rest.firstIndex(of: "`"), end != rest.startIndex else { return nil }
+            return String(rest[..<end])
+        }
+        return nil
+    }
 
     /// Pure: assembles the final file. Covered by `--selftest`.
     static func markdown(title: String,
@@ -506,11 +595,7 @@ enum Notes {
             // mic actually made it in; a silent participant looks identical to a dead mic.
             out += "Audio: `\(audioFile)`" + (sources.map { " — \($0)" } ?? "") + "\n\n"
         }
-        if !problems.isEmpty {
-            out += "> **Alpiste hit some problems:**\n"
-            for problem in problems { out += "> - \(problem)\n" }
-            out += "\n"
-        }
+        out += problemsBlock(problems)
         out += (notes ?? noNotesPlaceholder) + "\n"
         out += transcriptDivider
         out += transcript.isEmpty ? "_No transcript was produced._\n" : transcript + "\n"
@@ -526,11 +611,8 @@ enum Notes {
         let transcript = String(markdown[range.upperBound...])
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !transcript.isEmpty, transcript != "_No transcript was produced._" else { return nil }
-        let kept = markdown[..<range.lowerBound].split(separator: "\n").filter {
-            $0.hasPrefix("# ") || $0.hasPrefix("Audio: ")
-        }
-        guard kept.first?.hasPrefix("# ") == true else { return nil }
-        return (kept.joined(separator: "\n\n"), transcript)
+        guard let header = noteHeader(markdown) else { return nil }
+        return (header, transcript)
     }
 
     /// Pure: true when a saved note still has a transcript worth summarizing but no
@@ -556,6 +638,60 @@ enum Notes {
         let rebuilt = parts.header + "\n\n" + notes + "\n\n---\n\n## Transcript\n\n"
             + parts.transcript + "\n"
         try rebuilt.write(to: file, atomically: true, encoding: .utf8)
+    }
+
+    /// Re-transcribes a saved note from the audio next to it, then re-summarizes, in
+    /// place. This is the recovery path `--regenerate` cannot provide: regeneration
+    /// reuses the transcript it finds, so a transcript the decoder ruined stays ruined.
+    /// The `.m4a` is the only thing that was never lost, which is what makes recovery
+    /// possible at all. Returns whatever went wrong along the way.
+    @discardableResult
+    static func retranscribe(file: URL) async throws -> [String] {
+        let contents = try String(contentsOf: file, encoding: .utf8)
+        guard let header = noteHeader(contents) else {
+            throw Failure.badResponse("\(file.lastPathComponent) has no title line to keep")
+        }
+        guard let name = audioFileName(inNote: contents) else {
+            throw Failure.badResponse("\(file.lastPathComponent) does not name an audio file")
+        }
+        let audio = file.deletingLastPathComponent().appendingPathComponent(name)
+        guard FileManager.default.fileExists(atPath: audio.path) else {
+            throw Failure.badResponse("\(name) is no longer next to \(file.lastPathComponent)")
+        }
+
+        // Scratch lives beside the captures rather than in the system temp dir, for the
+        // same reason recordings do: a long re-run must not be purged mid-flight.
+        let scratch = supportDirectory
+            .appendingPathComponent("captures/retranscribe-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+
+        // Reuse the recording mixer: with a single source it is exactly the "audio in,
+        // 16 kHz mono wav out" conversion whisper needs, and it is already exercised by
+        // `--selftest` against a real ffmpeg.
+        let mixed = try await mix(Recorder.Capture(directory: scratch,
+                                                   systemAudio: audio,
+                                                   microphone: nil))
+        var problems: [String] = []
+        let transcribed = try await transcribe(mixed.wav16k)
+        let transcript = transcribed.text
+        if let warning = transcribed.warning { problems.append(warning) }
+        guard !transcript.isEmpty else {
+            throw Failure.badResponse("re-transcribing \(name) produced no text")
+        }
+        if let looping = runawayRepetition(transcript) { problems.append(looping) }
+
+        var notes: String?
+        do {
+            notes = try await summarize(transcript)
+        } catch {
+            problems.append(summaryFailurePrefix + error.localizedDescription)
+        }
+
+        let rebuilt = header + "\n\n" + problemsBlock(problems)
+            + (notes ?? noNotesPlaceholder) + "\n" + transcriptDivider + transcript + "\n"
+        try rebuilt.write(to: file, atomically: true, encoding: .utf8)
+        return problems
     }
 
     static func stamp(_ date: Date) -> String {
@@ -748,6 +884,7 @@ enum Env {
         var values = parse((try? String(contentsOf: file, encoding: .utf8)) ?? "")
         for key in ["GEMINI_API_KEY", "GEMINI_MODEL", "GROQ_API_KEY", "GROQ_MODEL",
                     "GROQ_WHISPER_MODEL", "OPENAI_API_KEY", "OPENAI_WHISPER_MODEL",
+                    "WHISPER_LANGUAGE",
                     "MEETING_APPS", "MEETING_DEBOUNCE_SECONDS", "MEETING_STOP_GRACE_MINUTES",
                     "MEETING_OVERRUN_MINUTES"] {
             if let override = ProcessInfo.processInfo.environment[key], !override.isEmpty {
