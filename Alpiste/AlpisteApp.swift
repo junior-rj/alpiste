@@ -13,6 +13,9 @@ struct AlpisteApp: App {
         if let flag = CommandLine.arguments.firstIndex(of: "--regenerate") {
             Self.regenerate(CommandLine.arguments.dropFirst(flag + 1).first)
         }
+        if let flag = CommandLine.arguments.firstIndex(of: "--retranscribe") {
+            Self.retranscribe(CommandLine.arguments.dropFirst(flag + 1).first)
+        }
         if CommandLine.arguments.contains("--backfill") { Self.backfill() }
     }
 
@@ -57,6 +60,38 @@ struct AlpisteApp: App {
                 exit(0)
             } catch {
                 Log.write("regenerate: failed — \(error.localizedDescription)")
+                print("FAIL \(error.localizedDescription)")
+                Log.flush()
+                exit(1)
+            }
+        }
+        dispatchMain()
+    }
+
+    /// `Alpiste --retranscribe <file.md>`: throws the saved transcript away and builds
+    /// a new one from the `.m4a` beside the note, then re-summarizes. Recovery for a
+    /// transcript the decoder looped on, which `--regenerate` cannot fix because it
+    /// reuses whatever transcript it finds. Parks the main thread like `--regenerate`.
+    private static func retranscribe(_ path: String?) -> Never {
+        guard let path else {
+            print("usage: Alpiste --retranscribe <file.md>")
+            Log.flush()
+            exit(2)
+        }
+        let file = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+        Log.startup("--retranscribe \(file.lastPathComponent)")
+        Task.detached {
+            do {
+                let problems = try await Notes.retranscribe(file: file)
+                Log.write("retranscribe: rewrote \(file.lastPathComponent)"
+                            + (problems.isEmpty ? " cleanly"
+                               : " with \(problems.count) problem(s): \(problems.joined(separator: "; "))"))
+                print("ok   rewrote \(file.lastPathComponent)")
+                for problem in problems { print("note \(problem)") }
+                Log.flush()
+                exit(0)
+            } catch {
+                Log.write("retranscribe: failed — \(error.localizedDescription)")
                 print("FAIL \(error.localizedDescription)")
                 Log.flush()
                 exit(1)
@@ -557,6 +592,58 @@ enum SelfTest {
                                           audioFile: "a.m4a", problems: ["Transcription failed"])
         expect(!Notes.pendingSummary(markdown: noTranscript),
                "pendingSummary: false when there is no transcript to summarize")
+
+        // The decoder-loop guard. Thresholds come from measuring every note in
+        // ~/MeetingNotes on 2026-08-25: the two ruined transcripts ran 80 and 39 lines
+        // deep, the worst healthy one reached 8 ("Bom dia." while a meeting fills up).
+        func repeated(_ line: String, _ times: Int, tail: String = "") -> String {
+            (Array(repeating: line, count: times) + (tail.isEmpty ? [] : [tail]))
+                .joined(separator: "\n")
+        }
+        expect(Notes.runawayRepetition(repeated("greetings everyone", 8)) == nil,
+               "runawayRepetition: a room really repeating itself is not a loop")
+        expect(Notes.runawayRepetition(
+                   repeated("stuck phrase", Notes.repetitionLimit - 1)) == nil,
+               "runawayRepetition: silent just below the limit")
+        expect(Notes.runawayRepetition(
+                   repeated("stuck phrase", Notes.repetitionLimit)) != nil,
+               "runawayRepetition: fires at the limit")
+        expect(Notes.runawayRepetition(repeated("stuck phrase", 80)) != nil,
+               "runawayRepetition: catches the 45 minute meeting that was lost")
+        // Blank lines between segments must not break the run; whisper emits them.
+        expect(Notes.runawayRepetition(repeated("stuck phrase\n", 40)) != nil,
+               "runawayRepetition: blank lines do not reset the run")
+        // Alternating lines are conversation, not a loop, however often they recur.
+        let alternating = Array(repeating: "yes\nno", count: 40).joined(separator: "\n")
+        expect(Notes.runawayRepetition(alternating) == nil,
+               "runawayRepetition: only consecutive repeats count")
+        // Problems are echoed to the log, where meeting content must never appear.
+        expect(Notes.runawayRepetition(repeated("secret meeting words", 40))?
+                .contains("secret") == false,
+               "runawayRepetition: never quotes the transcript")
+
+        // -l auto decides from the first 30 seconds and applies that guess to the whole
+        // file; a noisy opening turned a Portuguese meeting into an English translation.
+        expect(Notes.transcriptionLanguage([:]) == "pt",
+               "transcriptionLanguage: pinned by default, never auto")
+        expect(Notes.transcriptionLanguage(["WHISPER_LANGUAGE": "en"]) == "en",
+               "transcriptionLanguage: honours the override")
+        expect(Notes.transcriptionLanguage(["WHISPER_LANGUAGE": "  "]) == "pt",
+               "transcriptionLanguage: a blank override falls back rather than breaking the call")
+
+        // What --retranscribe needs to find the recording again.
+        expect(Notes.audioFileName(inNote: full) == "2026-07-31-2214.m4a",
+               "audioFileName: reads the audio line markdown() writes")
+        expect(Notes.audioFileName(inNote: oneSource) == "a.m4a",
+               "audioFileName: ignores the trailing sources")
+        expect(Notes.audioFileName(inNote: "# title only") == nil,
+               "audioFileName: nil when the note names no audio")
+        // A note whose transcription failed outright has no divider, and that is exactly
+        // the note --retranscribe exists for, so the header must still come back.
+        expect(Notes.noteHeader(noTranscript)?.contains("a.m4a") == true,
+               "noteHeader: works on a note with no usable transcript")
+        expect(Notes.noteHeader("no title line") == nil,
+               "noteHeader: nil without a title")
 
         // Provider order is a deliberate call, not an accident of how the ifs are typed:
         // Gemini's free tier caps at 20 requests a day and lost three meetings in two
