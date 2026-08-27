@@ -92,7 +92,19 @@ enum Recorder {
             // wrote five seconds of system.caf and then threw "Stream failed to start
             // microphone". Nothing ever salvages a capture that never became a session,
             // so tear it down here or the directory accumulates.
-            try? await stream.stopCapture()
+            //
+            // The stopCapture is not optional. That same day the 0.5.4 dropped the failed
+            // stream without it, and replayd kept the capture session alive for hours
+            // with a dead client, then grabbed the microphone on the next device wake;
+            // quitting the app did not release it. Whether replayd honours the stop is
+            // exactly what the log line is for, so the result is never swallowed.
+            do {
+                try await stream.stopCapture()
+                Log.write("capture start failed — \(error.localizedDescription); stopCapture ok")
+            } catch let stopError {
+                Log.write("capture start failed — \(error.localizedDescription); "
+                          + "stopCapture also failed — \(stopError.localizedDescription)")
+            }
             _ = tap.finish()
             try? FileManager.default.removeItem(at: directory)
             throw error
