@@ -82,6 +82,17 @@ Produto próprio
   extra com 2 s de espera, sem laço. Start que falha depois do stream já ter entregue áudio
   deixava `system.caf` parcial num diretório órfão em `captures/`; `Recorder.start` agora
   desfaz o diretório antes de relançar o erro
+- **Start que falha tem que chamar `stopCapture()`, e o log diz se o `replayd` obedeceu.** O
+  SCK roda a captura dentro do daemon `replayd`; em 27/08 o start falhou porque o mic padrão
+  era o do iPhone via Continuity ("Jr's I16P Microphone", `start mic capture timed out`), o
+  0.5.4 descartou o `SCStream` sem stop, e o `replayd` manteve a sessão viva por 6 h com o
+  cliente morto, pegou o microfone no primeiro wake do dispositivo (14:24) e **encerrar o
+  Alpiste não soltou**, porque o dono era o daemon. Sintoma: mic "em uso" sem app nenhum
+  segurando. Diagnóstico: `pmset -g assertions` mostra `com.apple.audio.AudioTap-…` com
+  `audio-in`, e a lista de `kAudioProcessPropertyIsRunningInput` (mesma leitura do
+  `MeetingWatcher`) acusa `com.apple.replayd`. Remédio: `killall replayd` (agente de usuário,
+  o launchd relança). O log unificado só responde por `/usr/bin/log show`: `log` é builtin do
+  zsh e devolve vazio
 - `Alpiste --regenerate <file.md>`: re-sumariza um .md já salvo, no lugar, reaproveitando o transcript
   (recuperação para quando o LLM falhou ou a chave não estava configurada na hora da gravação)
 - `Alpiste --retranscribe <file.md>`: joga o transcript fora e transcreve de novo a partir do `.m4a`
