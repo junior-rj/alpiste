@@ -47,10 +47,24 @@ xcodebuild -exportArchive \
   -exportOptionsPlist scripts/ExportOptions.plist \
   -exportPath "$STAGE/export"
 
+# O staging fica dentro do repo, que mora no Documents sincronizado pelo iCloud, e o
+# iCloud carimba o .app exportado com com.apple.FinderInfo e
+# com.apple.fileprovider.fpfs#P. Notarização e Gatekeeper aceitam, mas
+# `codesign --verify --strict` rejeita como detritus, e todo DMG até o 0.5.5 saiu
+# assim. Copiar para fora do Documents e limpar lá fecha a janela em que o iCloud
+# recarimbaria entre a limpeza e o hdiutil. O com.apple.provenance sobrevive ao
+# `xattr -c` e o codesign o ignora.
+echo "==> Limpando xattrs fora do Documents"
+DIST=$(mktemp -d /tmp/$APP_NAME-dist.XXXXXX)
+trap 'rm -rf "$DIST"' EXIT
+ditto "$STAGE/export/$APP_NAME.app" "$DIST/$APP_NAME.app"
+xattr -cr "$DIST/$APP_NAME.app"
+codesign --verify --deep --strict "$DIST/$APP_NAME.app"
+
 echo "==> Gerando DMG"
 DMG="$BUILD/$APP_NAME-$VERSION.dmg"
 rm -f "$DMG"
-hdiutil create -volname "$APP_NAME" -srcfolder "$STAGE/export/$APP_NAME.app" -ov -format UDZO "$DMG"
+hdiutil create -volname "$APP_NAME" -srcfolder "$DIST/$APP_NAME.app" -ov -format UDZO "$DMG"
 
 echo "==> Notarizando o DMG (aguarda concluir)"
 xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait
@@ -60,7 +74,11 @@ xcrun stapler staple "$DMG"
 
 echo "==> Verificação final"
 xcrun stapler validate "$DMG"
-spctl -a -t exec -vv "$STAGE/export/$APP_NAME.app"
+spctl -a -t exec -vv "$DIST/$APP_NAME.app"
+# O que vai no DMG é o que tem que passar no strict, não a cópia do staging.
+MNT=$(hdiutil attach "$DMG" -nobrowse -readonly | awk -F'\t' '/\/Volumes\//{print $NF}')
+codesign --verify --deep --strict "$MNT/$APP_NAME.app"
+hdiutil detach "$MNT" -quiet
 
 # Cada .app deixado no disco vira um registro separado no LaunchServices, e aí
 # Spotlight, Launchpad e o painel de Privacidade passam a listar um "Alpiste" por
