@@ -42,6 +42,11 @@ Produto próprio
   do archive muda de lugar dentro do DerivedData entre releases (`BuildProductsPath` numa vez,
   `InstallationBuildProductsLocation` noutra). DerivedData continua FORA do repo de propósito:
   dentro do Documents o iCloud recarimba atributos e o codesign rejeita como detritus.
+  O mesmo iCloud carimbava o `.app` exportado no `build/staging` (`com.apple.FinderInfo`,
+  `com.apple.fileprovider.fpfs#P`), e todo DMG até o 0.5.5 falhava `codesign --verify --strict`
+  sem ninguém notar, porque notarização e Gatekeeper aceitam. Desde o 0.5.6 o script copia o
+  app para um `mktemp -d` em /tmp, roda `xattr -cr` lá, exige o strict antes do `hdiutil` e
+  de novo no app dentro do DMG pronto. Verificar release por `spctl` sozinho não pega isso.
   **Gerou DMG, instala em /Applications na sequência, sempre.** DMG parado em `build/` não serve
   de nada: o app da barra de menu continua na versão velha e o que foi testado não é o que roda.
   Encerrar o Alpiste em execução antes (conferindo que não há gravação em andamento em
