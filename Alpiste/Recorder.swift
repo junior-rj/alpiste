@@ -85,7 +85,18 @@ enum Recorder {
         try stream.addStreamOutput(tap, type: .audio, sampleHandlerQueue: queue)
         try stream.addStreamOutput(tap, type: .microphone, sampleHandlerQueue: queue)
 
-        try await stream.startCapture()
+        do {
+            try await stream.startCapture()
+        } catch {
+            // A start can fail after SCK has already begun delivering: on 2026-08-27 it
+            // wrote five seconds of system.caf and then threw "Stream failed to start
+            // microphone". Nothing ever salvages a capture that never became a session,
+            // so tear it down here or the directory accumulates.
+            try? await stream.stopCapture()
+            _ = tap.finish()
+            try? FileManager.default.removeItem(at: directory)
+            throw error
+        }
         return Session(stream: stream, tap: tap, directory: directory)
     }
 

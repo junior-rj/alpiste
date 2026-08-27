@@ -66,7 +66,17 @@ Produto próprio
 - Quit (Cmd-Q) durante gravação ou processamento é interceptado por `AppDelegate.applicationShouldTerminate`:
   segura o quit (`.terminateLater`), deixa o pipeline salvar, e só então libera a saída
 - Stream do SCK que morre sozinho no meio da reunião (display desconectado, sleep/wake) é reportado
-  via callback e salva o que foi capturado até ali, em vez de deixar a UI travada em "Recording"
+  via callback e salva o que foi capturado até ali, em vez de deixar a UI travada em "Recording".
+  A causa comum é **tampa fechada no fim da reunião**: "Failed to find any displays or windows to
+  capture" no log bate ao segundo com `Display is turned off` no `pmset -g log` (26 e 27/08). Em
+  `streamFailed` o `stop()` vem **antes** do alerta, porque o alerta é modal e segura tudo até o
+  OK: com a ordem invertida a captura ficou 47 min parada em `captures/` esperando a tampa abrir
+- O start da gravação **tenta duas vezes**. Em 27/08 o SCK lançou "Stream failed to start
+  microphone" 100 s depois de um wake por tampa aberta, e a tentativa na mão 6 s depois
+  funcionou; sem ninguém olhando, a reunião de 46 min não teria sido gravada. Uma tentativa
+  extra com 2 s de espera, sem laço. Start que falha depois do stream já ter entregue áudio
+  deixava `system.caf` parcial num diretório órfão em `captures/`; `Recorder.start` agora
+  desfaz o diretório antes de relançar o erro
 - `Alpiste --regenerate <file.md>`: re-sumariza um .md já salvo, no lugar, reaproveitando o transcript
   (recuperação para quando o LLM falhou ou a chave não estava configurada na hora da gravação)
 - `Alpiste --retranscribe <file.md>`: joga o transcript fora e transcreve de novo a partir do `.m4a`
