@@ -245,10 +245,21 @@ final class AppState {
                         + "Enable the microphone in System Settings > Privacy & Security > Microphone.")
             }
 
+            let onStreamError: @Sendable (Error) -> Void = { [weak self] error in
+                Task { @MainActor in self?.streamFailed(error) }
+            }
             do {
                 let started = Date()
-                session = try await Recorder.start { [weak self] error in
-                    Task { @MainActor in self?.streamFailed(error) }
+                do {
+                    session = try await Recorder.start(onStreamError: onStreamError)
+                } catch {
+                    // One retry, not a loop. On 2026-08-27 SCK threw "Stream failed to
+                    // start microphone" 100 s after a lid-open wake, and the retry the
+                    // user made by hand six seconds later worked. Left alone, a meeting
+                    // nobody was watching would simply not have been recorded.
+                    Log.write("recording start failed once — \(error.localizedDescription), retrying in 2s")
+                    try await Task.sleep(for: .seconds(2))
+                    session = try await Recorder.start(onStreamError: onStreamError)
                 }
                 startedAt = started
                 phase = .recording
@@ -262,16 +273,22 @@ final class AppState {
         }
     }
 
-    /// SCK stopped the stream on its own (display disconnected, permission revoked,
-    /// sleep/wake). Save whatever was captured instead of leaving the UI stuck on
-    /// "Recording" with nothing further ever being written.
+    /// SCK stopped the stream on its own (lid closed, display disconnected, permission
+    /// revoked, sleep/wake). Save whatever was captured instead of leaving the UI stuck
+    /// on "Recording" with nothing further ever being written.
+    ///
+    /// `stop()` goes before the alert on purpose: `alert` is modal and blocks until
+    /// dismissed. With the order reversed, the two lid-close cases of 2026-08-26/27 sat
+    /// with the capture unprocessed until the lid opened and OK was clicked (47 min the
+    /// first time), and a shutdown in between would have left it stranded in captures/.
     private func streamFailed(_ error: Error) {
         guard isRecording, session != nil else { return }  // a user-initiated stop already tore this down
         Log.write("capture stream stopped on its own — \(error.localizedDescription)")
+        stop()
         alert("Recording interrupted",
               "The capture stream stopped (\(error.localizedDescription)). "
-                + "Saving what was recorded so far.")
-        stop()
+                + "What was recorded up to that point is being saved. "
+                + "Closing the lid mid-recording is the usual cause.")
     }
 
     func stop() {
