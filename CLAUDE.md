@@ -90,9 +90,10 @@ Produto próprio
   Alpiste não soltou**, porque o dono era o daemon. Sintoma: mic "em uso" sem app nenhum
   segurando. Diagnóstico: `pmset -g assertions` mostra `com.apple.audio.AudioTap-…` com
   `audio-in`, e a lista de `kAudioProcessPropertyIsRunningInput` (mesma leitura do
-  `MeetingWatcher`) acusa `com.apple.replayd`. Remédio: `killall replayd` (agente de usuário,
-  o launchd relança). O log unificado só responde por `/usr/bin/log show`: `log` é builtin do
-  zsh e devolve vazio
+  `MeetingWatcher`) acusa `com.apple.replayd`. Remédio: **`kill -9 $(pgrep -x replayd)`**; o
+  daemon ignora SIGTERM (`killall` diz ok e o pid não muda) e `launchctl kickstart -k` é barrado
+  pelo SIP. O launchd relança sob demanda. O log unificado só responde por `/usr/bin/log show`:
+  `log` é builtin do zsh e devolve vazio
 - `Alpiste --regenerate <file.md>`: re-sumariza um .md já salvo, no lugar, reaproveitando o transcript
   (recuperação para quando o LLM falhou ou a chave não estava configurada na hora da gravação)
 - `Alpiste --retranscribe <file.md>`: joga o transcript fora e transcreve de novo a partir do `.m4a`
