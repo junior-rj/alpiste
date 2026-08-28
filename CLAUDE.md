@@ -13,7 +13,7 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
 - Saída em `~/MeetingNotes/YYYY-MM-DD-HHMM.md` + `.m4a` ao lado
 
 ## Contexto
-- Repo: https://github.com/junior-rj/alpiste (público desde 2026-08-28, MIT, releases com DMG
+- Repo: https://github.com/junior-rj/alpiste (público desde 2026-08-27, MIT, releases com DMG
   assinado e notarizado). Nota interna fica em `CLAUDE.local.md`, ignorado pelo git
 - Referência de produto: Granola (granola.ai)
 - Projeto via XcodeGen (project.yml é a fonte de verdade, .xcodeproj gitignored)
