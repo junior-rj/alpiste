@@ -3,9 +3,6 @@
 ## O que é
 App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o áudio da reunião, transcreve e gera notas estruturadas.
 
-## Tipo
-Produto próprio
-
 ## Escopo
 - App novo em SwiftUI, macOS 15+ (piso do `SCStreamConfiguration.captureMicrophone`)
 - Captura de áudio da reunião (sistema + microfone) via ScreenCaptureKit
@@ -16,9 +13,9 @@ Produto próprio
 - Saída em `~/MeetingNotes/YYYY-MM-DD-HHMM.md` + `.m4a` ao lado
 
 ## Contexto
+- Repo: https://github.com/junior-rj/alpiste (público desde 2026-08-28, MIT, releases com DMG
+  assinado e notarizado). Nota interna fica em `CLAUDE.local.md`, ignorado pelo git
 - Referência de produto: Granola (granola.ai)
-- Sem prazo, projeto pessoal
-- Seguir a skill ios-swift-guidelines
 - Projeto via XcodeGen (project.yml é a fonte de verdade, .xcodeproj gitignored)
 - Base copiada do menubar-hide: project.yml, postura de assinatura, padrão de permissão do ScreenCaptureKit
 - Sem contas, sem cloud storage, sem telemetria: só a chamada do LLM sai da máquina
@@ -36,7 +33,8 @@ Produto próprio
 - Alpiste/AlpisteApp.swift — MenuBarExtra, máquina de estados, permissões, `SelfTest`
 - scripts/setup.sh — brew deps + download do ggml-medium.bin + ~/.alpiste/.env
 - scripts/make-icon.py — gera o AppIcon (grãos-onda) com Pillow, sem dependência externa
-- scripts/release.sh — DMG assinado (Developer ID) e notarizado, perfil yourlaunch-notary.
+- scripts/release.sh — DMG assinado (Developer ID) e notarizado; o perfil de notary vem da
+  variável `NOTARY_PROFILE` (perfil do keychain criado com `notarytool store-credentials`).
   No fim ele pergunta ao LaunchServices quais `Alpiste.app` estão registrados e desregistra tudo
   que não seja o instalado. É por consulta, e não por caminho fixo, porque o `.app` intermediário
   do archive muda de lugar dentro do DerivedData entre releases (`BuildProductsPath` numa vez,
@@ -51,7 +49,10 @@ Produto próprio
   de nada: o app da barra de menu continua na versão velha e o que foi testado não é o que roda.
   Encerrar o Alpiste em execução antes (conferindo que não há gravação em andamento em
   `~/Library/Application Support/Alpiste/captures/`), substituir o .app e relançar. A permissão
-  de TCC sobrevive porque a identidade Developer ID é a mesma
+  de TCC sobrevive porque a identidade Developer ID é a mesma. Depois: tag `vX.Y.Z` anotada,
+  `git push origin main --follow-tags` e `gh release create vX.Y.Z build/Alpiste-X.Y.Z.dmg`
+  com notas em inglês (abertura, bullets, fechamento "Signed with Developer ID and notarized
+  by Apple. Requires macOS 15+."). Tag sem release no GitHub não serve para quem instala
 
 ## Regras específicas
 - O ScreenCaptureKit NÃO mistura mic com áudio do sistema: chegam em output types e formatos
@@ -84,7 +85,7 @@ Produto próprio
   desfaz o diretório antes de relançar o erro
 - **Start que falha tem que chamar `stopCapture()`, e o log diz se o `replayd` obedeceu.** O
   SCK roda a captura dentro do daemon `replayd`; em 27/08 o start falhou porque o mic padrão
-  era o do iPhone via Continuity ("Jr's I16P Microphone", `start mic capture timed out`), o
+  era o de um iPhone via Continuity (`start mic capture timed out`), o
   0.5.4 descartou o `SCStream` sem stop, e o `replayd` manteve a sessão viva por 6 h com o
   cliente morto, pegou o microfone no primeiro wake do dispositivo (14:24) e **encerrar o
   Alpiste não soltou**, porque o dono era o daemon. Sintoma: mic "em uso" sem app nenhum

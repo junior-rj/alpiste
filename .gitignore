@@ -5,3 +5,8 @@
 *.xcodeproj
 build/
 DerivedData/
+
+# notas internas: o repo e publico
+CLAUDE.local.md
+auditoria*.md
+.claude/settings.local.json

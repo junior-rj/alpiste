@@ -35,7 +35,7 @@ targets:
         # menu bar only: sem icone no Dock
         INFOPLIST_KEY_LSUIElement: true
         INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.productivity"
-        INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2026 Junior. MIT License."
+        INFOPLIST_KEY_NSHumanReadableCopyright: "© 2026 Sparrow. MIT License."
         INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription: "Alpiste reads your calendar only to title a meeting note and to know when the meeting is scheduled to end. Nothing is written to your calendar and nothing leaves your Mac."
         INFOPLIST_KEY_NSMicrophoneUsageDescription: "Alpiste records your microphone alongside the meeting audio so the transcript includes your side of the conversation."
         # Regenerate the asset with: python3 scripts/make-icon.py

@@ -1,4 +1,14 @@
-# Alpiste
+<p align="center">
+  <img src="Alpiste/Assets.xcassets/AppIcon.appiconset/icon_256.png" width="128" alt="Alpiste icon">
+</p>
+
+<h1 align="center">Alpiste</h1>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/macOS-15%2B-blue" alt="macOS 15+">
+  <img src="https://img.shields.io/badge/Swift-6-orange" alt="Swift 6">
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT license">
+</p>
 
 A macOS menu bar app that records a meeting, transcribes it, and writes structured notes
 to `~/MeetingNotes/`. Granola-style, but everything stays on your machine.
@@ -58,14 +68,22 @@ picked up within a couple of seconds; no relaunch needed.
 
 ## Install
 
+Download `Alpiste-<version>.dmg` from the [latest release](../../releases/latest), drag the
+app to Applications and open it. The app is signed with a Developer ID and notarized by
+Apple, so Gatekeeper lets it through. You still need the command-line pieces it shells out
+to (`ffmpeg`, `whisper-cli`, the model and the `.env` file), which `scripts/setup.sh`
+installs from a clone of this repo.
+
+To build from source instead:
+
 ```sh
 ./scripts/setup.sh          # ffmpeg, whisper-cpp, the ~1.5 GB medium model, and ~/.alpiste/.env
 xcodegen                    # generates Alpiste.xcodeproj from project.yml
 xcodebuild -scheme Alpiste -configuration Release build
 ```
 
-Then copy the built `Alpiste.app` to `/Applications` and open it. It lives in the menu bar
-only, with no Dock icon.
+Then copy the built `Alpiste.app` to `/Applications` and open it. Either way it lives in the
+menu bar only, with no Dock icon.
 
 Requires macOS 15 or later. `SCStreamConfiguration.captureMicrophone`, which is how the app
 gets your voice and the meeting audio from a single capture stream, does not exist before
@@ -195,8 +213,10 @@ whisper-cli -m ~/Library/Application\ Support/Alpiste/models/ggml-medium.bin \
 Regenerates the icon, archives, signs with Developer ID, packages a DMG, notarizes it with
 Apple, and staples the ticket. Requires a clean working tree, `xcodegen`, and Pillow (for
 the icon). Output lands in `build/Alpiste-<version>.dmg`, where `<version>` comes from
-`MARKETING_VERSION` in `project.yml`. Uses the `yourlaunch-notary` keychain profile;
-override with `NOTARY_PROFILE=...`.
+`MARKETING_VERSION` in `project.yml`. Adjust the signing identity (`DEVELOPMENT_TEAM` in
+`project.yml`, `teamID` in `scripts/ExportOptions.plist`) and the notary profile
+(`NOTARY_PROFILE=...`, a keychain profile from `notarytool store-credentials`) to your own
+team.
 
 ## The icon
 
@@ -216,11 +236,28 @@ hairlines once macOS scales the icon to 32px.
 - `project.yml` is the source of truth. Run `xcodegen` after changing it; the `.xcodeproj`
   is gitignored.
 - No app sandbox, hardened runtime on. The app shells out to `ffmpeg` and `whisper-cli`,
-  which the sandbox would block. Same posture as the sibling `menubar-hide` project.
+  which the sandbox would block. Same posture as the sibling
+  [menubar-hide](https://github.com/junior-rj/menubar-hide) project.
 - Homebrew binaries are located by probing `/opt/homebrew/bin` and `/usr/local/bin`
   directly. An app launched from Finder does not inherit your shell's PATH.
 
 ## Not included
 
-Speaker diarization, a notes browser, live transcription, calendar integration, and any
-settings UI. Configuration is the `.env` file and the model directory.
+Speaker diarization, a notes browser, live transcription, and any settings UI.
+Configuration is the `.env` file and the model directory.
+
+## Credits
+
+- [whisper.cpp](https://github.com/ggml-org/whisper.cpp) (MIT) does the transcription, with
+  the [Whisper](https://github.com/openai/whisper) `medium` weights from OpenAI (MIT),
+  downloaded by `setup.sh` and never bundled here.
+- [ffmpeg](https://ffmpeg.org) mixes the audio. It is called as an external binary that you
+  install with Homebrew; nothing from it is linked into or redistributed with this app.
+- [XcodeGen](https://github.com/yonaskolb/XcodeGen) (MIT) and
+  [Pillow](https://python-pillow.org) are build-time only, for the project file and the icon.
+
+All code in this repository is original.
+
+## License
+
+[MIT](LICENSE) © Sparrow Serviços e Soluções em Informática

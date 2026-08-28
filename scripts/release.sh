@@ -1,7 +1,8 @@
 #!/bin/bash
 #
 # release.sh — Build, sign (Developer ID), notarize and package Alpiste as a DMG.
-# Same flow as menubar-hide/scripts/release.sh; uses the team-wide notary profile.
+# Same flow as menubar-hide/scripts/release.sh. The notary profile comes from NOTARY_PROFILE
+# (a keychain profile created with `notarytool store-credentials`); override it for your team.
 #
 # Uso:
 #   ./scripts/release.sh
