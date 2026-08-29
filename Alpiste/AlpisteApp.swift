@@ -10,13 +10,24 @@ struct AlpisteApp: App {
     init() {
         // Handled before the UI comes up so `Alpiste --selftest` works from a terminal.
         if CommandLine.arguments.contains("--selftest") { SelfTest.run() }
-        if let flag = CommandLine.arguments.firstIndex(of: "--regenerate") {
-            Self.regenerate(CommandLine.arguments.dropFirst(flag + 1).first)
+        if CommandLine.arguments.contains("--regenerate") {
+            Self.regenerate(Self.operand(after: "--regenerate", in: CommandLine.arguments))
         }
-        if let flag = CommandLine.arguments.firstIndex(of: "--retranscribe") {
-            Self.retranscribe(CommandLine.arguments.dropFirst(flag + 1).first)
+        if CommandLine.arguments.contains("--retranscribe") {
+            Self.retranscribe(Self.operand(after: "--retranscribe", in: CommandLine.arguments))
         }
         if CommandLine.arguments.contains("--backfill") { Self.backfill() }
+    }
+
+    /// Pure: the path that follows `flag`, or nil when what follows is another flag.
+    /// Without the second half, `Alpiste --regenerate --backfill` goes looking for a file
+    /// named "--backfill" and reports the wrong failure. Covered by `--selftest`.
+    nonisolated static func operand(after flag: String, in arguments: [String]) -> String? {
+        guard let index = arguments.firstIndex(of: flag),
+              let next = arguments.dropFirst(index + 1).first,
+              !next.hasPrefix("--")
+        else { return nil }
+        return next
     }
 
     /// `Alpiste --backfill`: runs the sweep the app performs on its own, now and from a
@@ -202,6 +213,10 @@ final class AppState {
     private var session: Recorder.Session?
     private var startedAt: Date?
     private var ticker: Timer?
+    /// A stream that died in the window between `Recorder.start` returning and the phase
+    /// becoming `.recording`, where `streamFailed` has no session to stop yet. Held here
+    /// so `start()` can act on it instead of the UI showing a timer against a dead stream.
+    private var pendingStreamError: (any Error)?
 
     var isRecording: Bool { if case .recording = phase { true } else { false } }
     var isBusy: Bool { if case .working = phase { true } else { false } }
@@ -236,14 +251,15 @@ final class AppState {
                       "Alpiste needs Screen Recording to capture the meeting's audio.\n\n"
                         + "Enable it in System Settings > Privacy & Security > Screen Recording, "
                         + "then quit and reopen Alpiste. macOS only applies this permission on relaunch.")
+                finishTerminationIfPending()
                 return
             }
 
-            if await !Recorder.requestMicPermission() {
-                alert("Microphone is off",
-                      "Alpiste will record the meeting's audio but not your voice.\n\n"
-                        + "Enable the microphone in System Settings > Privacy & Security > Microphone.")
-            }
+            // Asking has to happen before the stream starts, since this is what raises the
+            // TCC dialog, but *warning* about a denial must not: `alert` is modal, and on
+            // 0.5.7 it held the start until someone clicked OK, blocking the very recording
+            // the text promises will still happen. Warn once there is a stream.
+            let micDenied = await !Recorder.requestMicPermission()
 
             let onStreamError: @Sendable (Error) -> Void = { [weak self] error in
                 Task { @MainActor in self?.streamFailed(error) }
@@ -265,10 +281,30 @@ final class AppState {
                 phase = .recording
                 startTicking(from: started)
                 Log.write("recording started")
+                if micDenied {
+                    alert("Microphone is off",
+                          "Alpiste is recording the meeting's audio but not your voice.\n\n"
+                            + "Enable the microphone in System Settings > Privacy & Security > Microphone.")
+                }
+                // The stream died while we were still setting up: act on it now that there
+                // is a session to tear down, rather than leaving a ticking timer against it.
+                if let died = pendingStreamError {
+                    pendingStreamError = nil
+                    streamFailed(died)
+                    return
+                }
+                // Cmd-Q landed inside the "Starting…" window. There is a recording now, so
+                // honour the quit the way `applicationShouldTerminate` would have: stop and
+                // let the pipeline save, and `stop()` answers AppKit when it is done.
+                if pendingTermination {
+                    Log.write("quit requested while starting — stopping and saving")
+                    stop()
+                }
             } catch {
                 Log.write("recording could not start — \(error.localizedDescription)")
                 phase = .failed(error.localizedDescription)
                 alert("Could not start recording", error.localizedDescription)
+                finishTerminationIfPending()
             }
         }
     }
@@ -282,7 +318,14 @@ final class AppState {
     /// with the capture unprocessed until the lid opened and OK was clicked (47 min the
     /// first time), and a shutdown in between would have left it stranded in captures/.
     private func streamFailed(_ error: Error) {
-        guard isRecording, session != nil else { return }  // a user-initiated stop already tore this down
+        guard session != nil else { return }  // a user-initiated stop already tore this down
+        guard isRecording else {
+            // Between `Recorder.start` returning and the phase becoming `.recording`:
+            // `stop()` would find nothing to stop and the death would vanish, leaving the
+            // menu counting time against a stream that is already gone.
+            pendingStreamError = error
+            return
+        }
         Log.write("capture stream stopped on its own — \(error.localizedDescription)")
         stop()
         alert("Recording interrupted",
@@ -292,8 +335,13 @@ final class AppState {
     }
 
     func stop() {
-        guard let session, let startedAt else { return }
+        guard let session, let startedAt else {
+            // Nothing to save. A quit waiting on this would otherwise wait forever.
+            finishTerminationIfPending()
+            return
+        }
         self.session = nil
+        pendingStreamError = nil
         let title = meetingTitle
         meetingTitle = nil
         stopTicking()
@@ -340,8 +388,20 @@ final class AppState {
                 alert("Could not save notes", message + "\n\nDetails in \(Log.file.path)")
             }
 
-            if pendingTermination { NSApp.reply(toApplicationShouldTerminate: true) }
+            finishTerminationIfPending()
         }
+    }
+
+    /// Releases a quit that `applicationShouldTerminate` deferred. Exactly one reply is
+    /// allowed, and every terminal exit of `start()` and `stop()` owes it: 0.5.7 replied
+    /// only from the end of the pipeline, so Cmd-Q inside the "Starting…" window was never
+    /// answered, the app could not be quit at all, and `pendingTermination` went on
+    /// swallowing every alert for the rest of the session.
+    private func finishTerminationIfPending() {
+        guard pendingTermination else { return }
+        pendingTermination = false
+        Log.write("quit released, nothing left to save")
+        NSApp.reply(toApplicationShouldTerminate: true)
     }
 
     /// A backfill sweep filled in a note after the fact. Point "Open …" at it and say so
@@ -358,13 +418,24 @@ final class AppState {
         }
     }
 
-    /// Every scheduled retry is spent and a note is still missing its summary. This is
-    /// the moment the alert deferred at recording time comes due.
-    func backfillGaveUp() {
-        guard case .retrying(let file) = phase else { return }
-        phase = .failed("no notes for \(file.lastPathComponent)")
+    /// Every scheduled retry is spent and these notes are still missing their summary.
+    /// This is the moment the alert deferred at recording time comes due.
+    ///
+    /// Keyed off the files rather than the phase. Reading `.retrying` off the phase was
+    /// enough to lose the alert entirely: recording a second meeting in the meantime, or
+    /// having had an unrecoverable problem alongside the pending summary (which lands in
+    /// `.done`, not `.retrying`), left the backfill logging its surrender to nobody.
+    func backfillGaveUp(_ files: [URL]) {
+        guard let file = files.first else { return }
+        let names = files.map(\.lastPathComponent).joined(separator: ", ")
+        // Never overwrite the status line of something still live, same rule as
+        // `noteBackfilled`; the alert still goes out either way.
+        switch phase {
+        case .recording, .working: break
+        default: phase = .failed("no notes for \(names)")
+        }
         alert("Could not generate notes",
-              "\(file.lastPathComponent) still has no summary after every retry. "
+              "\(names) still \(files.count == 1 ? "has" : "have") no summary after every retry. "
                 + "The transcript and audio are safe — run\n\n"
                 + "Alpiste --regenerate \(file.path)\n\nto try again.\n\n"
                 + "Details in \(Log.file.path)")
@@ -447,7 +518,11 @@ final class AppState {
         // A modal here while AppKit is waiting on applicationShouldTerminate would
         // block the reply that lets the app actually quit; log instead.
         guard !pendingTermination else {
-            NSLog("alpiste: \(title) — \(message)")
+            // Not NSLog: on 2026-08-20 it never reached the unified log, and this is the
+            // worst moment to lose a message, since the app is quitting mid-pipeline and
+            // the text may well be "Could not save notes". Nothing here is a secret or
+            // meeting content, only file names and problem strings.
+            Log.write("alert suppressed while quitting: \(title) — \(message)")
             return
         }
         let alert = NSAlert()
@@ -483,26 +558,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         print("showing the meeting prompt — click a button, or wait for it to time out")
         MeetingPrompt.show(subtitle: "Weekly sync with the design team") {
             print("ok   Record")
+            Log.flush()
             exit(0)
         } onDecline: {
             print("ok   Not now")
+            Log.flush()
             exit(0)
         }
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         let state = AppState.shared
-        switch state.phase {
-        case .recording:
+        switch QuitDecision.decide(isRecording: state.isRecording, isBusy: state.isBusy) {
+        case .now:
+            return .terminateNow
+        case .stopThenWait:
             state.pendingTermination = true
             state.stop()
             return .terminateLater
-        case .working:
+        case .wait:
             state.pendingTermination = true
             return .terminateLater
-        default:
-            return .terminateNow
         }
+    }
+}
+
+/// Pure: what Cmd-Q has to do about work in flight. Covered by `--selftest`.
+///
+/// `.wait` covers the whole of `.working`, which is both the pipeline *and* the
+/// "Starting…" window before a stream exists. Both hold the quit, so both oblige
+/// `AppState` to answer AppKit once there is nothing left to save.
+enum QuitDecision: Equatable {
+    /// Nothing in flight: let AppKit tear the app down now.
+    case now
+    /// A live recording: stop it, then answer once the pipeline has written the note.
+    case stopThenWait
+    /// Starting up, or saving: answer once that finishes.
+    case wait
+
+    static func decide(isRecording: Bool, isBusy: Bool) -> QuitDecision {
+        if isRecording { return .stopThenWait }
+        return isBusy ? .wait : .now
     }
 }
 
@@ -828,6 +924,43 @@ enum SelfTest {
                                            startedAt: joined)
                 == joined.addingTimeInterval(600),
                "autoStopDate: never stops before the minimum recording length")
+
+        // Cmd-Q while something is in flight. `.wait` is the case that was broken: the
+        // "Starting…" window is `.working` with no session yet, AppKit was told to hold
+        // the quit, and nothing ever answered it, so the app could not be quit at all.
+        expect(QuitDecision.decide(isRecording: false, isBusy: false) == .now,
+               "quit: an idle app quits immediately")
+        expect(QuitDecision.decide(isRecording: true, isBusy: false) == .stopThenWait,
+               "quit: a live recording is stopped and saved first")
+        expect(QuitDecision.decide(isRecording: false, isBusy: true) == .wait,
+               "quit: starting up or saving holds the quit until it is answered")
+
+        // `Alpiste --regenerate --backfill` used to go looking for a file named
+        // "--backfill" and fail with an error about the wrong thing entirely.
+        expect(AlpisteApp.operand(after: "--regenerate",
+                                  in: ["Alpiste", "--regenerate", "note.md"]) == "note.md",
+               "operand: reads the path after the flag")
+        expect(AlpisteApp.operand(after: "--regenerate",
+                                  in: ["Alpiste", "--regenerate", "--backfill"]) == nil,
+               "operand: another flag is not a path")
+        expect(AlpisteApp.operand(after: "--regenerate", in: ["Alpiste", "--regenerate"]) == nil,
+               "operand: nil when the flag ends the line")
+
+        // A capture daemon that never answers must not park the app in "Starting…"
+        // forever, so the ceiling abandons the call rather than waiting it out.
+        let ceiling = Date()
+        do {
+            _ = try await Recorder.withDeadline(1, "selftest") {
+                try await Task.sleep(for: .seconds(30))
+                return 0
+            }
+            expect(false, "withDeadline: abandons work that outruns the ceiling")
+        } catch {
+            expect(Date().timeIntervalSince(ceiling) < 10,
+                   "withDeadline: abandons work that outruns the ceiling")
+        }
+        let landed = try? await Recorder.withDeadline(30, "selftest") { 7 }
+        expect(landed == 7, "withDeadline: a result that arrives in time comes straight back")
 
         expect(Tool.find("ffmpeg") != nil, "tools: ffmpeg found without a login PATH")
 
