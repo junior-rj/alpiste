@@ -70,7 +70,15 @@ enum Backfill {
                     + pending.map(\.lastPathComponent).joined(separator: ", "))
 
         var result = Result()
-        for file in pending {
+        for (index, file) in pending.enumerated() {
+            // Groq's on_demand tier cuts at 8000 tokens per minute counted across
+            // requests, and one long transcript is most of that on its own. Back to back,
+            // the second note is refused with a 413 — which is a size complaint about a
+            // rate limit, and is not in `transientStatuses` — so it falls straight through
+            // to Gemini and spends one of its twenty daily requests on a meeting Groq
+            // would have taken. Waiting out the window is the whole reason
+            // `groqTranscriptLimit` was measured in the first place.
+            if index > 0 { try? await Task.sleep(for: .seconds(65)) }
             do {
                 try await Notes.regenerate(file: file)
                 Log.write("backfill: filled in \(file.lastPathComponent)")
