@@ -48,9 +48,10 @@ enum Backfill {
             }
             // Every pass is spent and something is still unsummarized. Saying so is the
             // whole point of having deferred the alert at recording time: silence here
-            // would leave the note broken with nobody told.
+            // would leave the note broken with nobody told. The list is re-read rather
+            // than remembered, so the alert names only what is still missing.
             Log.write("backfill: retries exhausted, notes still pending")
-            AppState.shared.backfillGaveUp()
+            AppState.shared.backfillGaveUp(pendingFiles())
         }
     }
 

@@ -1,3 +1,4 @@
+import AppKit
 import AVFoundation
 import ScreenCaptureKit
 
@@ -21,6 +22,7 @@ enum Recorder {
     enum Failure: LocalizedError {
         case noDisplay
         case screenRecordingDenied
+        case timedOut(String, TimeInterval)
 
         var errorDescription: String? {
             switch self {
@@ -30,17 +32,38 @@ enum Recorder {
                 "Screen Recording permission is required to capture system audio. "
                     + "Grant it in System Settings > Privacy & Security > Screen Recording, "
                     + "then relaunch Alpiste."
+            case .timedOut(let what, let seconds):
+                "\(what) did not answer within \(Int(seconds))s. "
+                    + "The capture daemon may be wedged; try again."
             }
         }
     }
 
+    /// Ceilings for the two ScreenCaptureKit calls that can hang without ever returning.
+    /// Generous: a cold `replayd` on a busy machine is slow, and cutting a start that was
+    /// merely late would be worse than the wait.
+    static let contentTimeout: TimeInterval = 20
+    static let startTimeout: TimeInterval = 45
+
     static func hasScreenPermission() -> Bool { CGPreflightScreenCaptureAccess() }
 
+    /// Both of these raise a system dialog, so both activate first. Alpiste is
+    /// `LSUIElement`: with no Dock icon there is nothing to click to bring a dialog
+    /// forward, and on 2026-08-24 the calendar prompt opened behind the meeting window
+    /// and was never answered. The microphone one is worse, because `start()` stays
+    /// suspended on it with `isBusy` true, which also disables the menu item and the
+    /// watcher until the app is relaunched.
+    @MainActor
     @discardableResult
-    static func requestScreenPermission() -> Bool { CGRequestScreenCaptureAccess() }
+    static func requestScreenPermission() -> Bool {
+        NSApp.activate(ignoringOtherApps: true)
+        return CGRequestScreenCaptureAccess()
+    }
 
+    @MainActor
     static func requestMicPermission() async -> Bool {
-        await AVCaptureDevice.requestAccess(for: .audio)
+        NSApp.activate(ignoringOtherApps: true)
+        return await AVCaptureDevice.requestAccess(for: .audio)
     }
 
     /// Starts capturing. Call `stop()` on the returned session to finish. `onStreamError`
@@ -50,9 +73,14 @@ enum Recorder {
     static func start(onStreamError: @escaping @Sendable (Error) -> Void) async throws -> Session {
         guard hasScreenPermission() else { throw Failure.screenRecordingDenied }
 
-        let content = try await SCShareableContent.excludingDesktopWindows(
-            false, onScreenWindowsOnly: false)
-        guard let display = content.displays.first else { throw Failure.noDisplay }
+        // Everything SCK gives us here is non-Sendable, so the filter is built inside the
+        // deadline and only the box crosses back out.
+        let filter = try await withDeadline(contentTimeout, "shareable content") {
+            let content = try await SCShareableContent.excludingDesktopWindows(
+                false, onScreenWindowsOnly: false)
+            guard let display = content.displays.first else { throw Failure.noDisplay }
+            return FilterBox(filter: SCContentFilter(display: display, excludingWindows: []))
+        }.filter
 
         // Application Support rather than the temp directory: a multi-hour meeting can
         // reach several GB, and macOS is free to purge temporaryDirectory under disk
@@ -76,7 +104,6 @@ enum Recorder {
         config.showsCursor = false
         config.queueDepth = 6
 
-        let filter = SCContentFilter(display: display, excludingWindows: [])
         let tap = AudioTap(directory: directory, onStop: onStreamError)
         let stream = SCStream(filter: filter, configuration: config, delegate: tap)
 
@@ -86,7 +113,15 @@ enum Recorder {
         try stream.addStreamOutput(tap, type: .microphone, sampleHandlerQueue: queue)
 
         do {
-            try await stream.startCapture()
+            // A wedged replayd or WindowServer can leave `startCapture` outstanding
+            // forever, and the state machine parks in "Starting…" with the menu item
+            // disabled and the watcher unable to propose anything. If the deadline wins,
+            // the call is abandoned but the `catch` below still stops the stream, which
+            // is what keeps a late success from becoming an orphaned replayd session.
+            let box = StreamBox(stream: stream)
+            try await withDeadline(startTimeout, "startCapture") {
+                try await box.stream.startCapture()
+            }
         } catch {
             // A start can fail after SCK has already begun delivering: on 2026-08-27 it
             // wrote five seconds of system.caf and then threw "Stream failed to start
@@ -110,6 +145,86 @@ enum Recorder {
             throw error
         }
         return Session(stream: stream, tap: tap, directory: directory)
+    }
+
+    /// One-way handoffs of ScreenCaptureKit types that are not marked Sendable, so the
+    /// deadline race below can hold them. Nothing mutates them and nothing else reads
+    /// them, same reasoning as `Session`.
+    private struct FilterBox: @unchecked Sendable { let filter: SCContentFilter }
+    private struct StreamBox: @unchecked Sendable { let stream: SCStream }
+
+    /// Runs `work` with a ceiling, and **abandons** it if the ceiling is reached instead
+    /// of waiting for it to unwind. That is the whole point: the calls this guards hang
+    /// inside a daemon that will not honour cancellation, so a `TaskGroup` would be no
+    /// help, since the group awaits every child before its scope can exit.
+    ///
+    /// Whoever lands first wins; `Landing` drops the loser on the floor.
+    static func withDeadline<T: Sendable>(
+        _ seconds: TimeInterval, _ what: String,
+        _ work: @escaping @Sendable () async throws -> T) async throws -> T {
+
+        let landing = Landing<T>()
+        Task {
+            do { landing.settle(.success(try await work())) }
+            catch { landing.settle(.failure(CapturedError(error))) }
+        }
+        let timer = Task {
+            try? await Task.sleep(for: .seconds(seconds))
+            guard !Task.isCancelled else { return }
+            Log.write("\(what) hit its \(Int(seconds))s ceiling and was abandoned")
+            landing.settle(.failure(CapturedError(Failure.timedOut(what, seconds))))
+        }
+        defer { timer.cancel() }
+        return try await withCheckedThrowingContinuation { continuation in
+            landing.wait(continuation)
+        }
+    }
+
+    /// What comes back out of `withDeadline` when the work throws. An error crossing a
+    /// task boundary has to be Sendable and `any Error` is not, so the message travels
+    /// instead of the value. Everything downstream reads `localizedDescription` and
+    /// nothing switches on the type, so nothing is lost.
+    struct CapturedError: LocalizedError, Sendable {
+        let errorDescription: String?
+        init(_ error: any Error) { errorDescription = error.localizedDescription }
+    }
+
+    /// A continuation exactly one of two racers may resume, holding the result when it
+    /// lands before anyone is waiting for it.
+    private final class Landing<T: Sendable>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<T, any Error>?
+        private var result: Result<T, CapturedError>?
+        private var settled = false
+
+        func wait(_ continuation: CheckedContinuation<T, any Error>) {
+            lock.lock()
+            let landed = result
+            self.continuation = landed == nil ? continuation : nil
+            lock.unlock()
+            if let landed { Self.deliver(landed, to: continuation) }
+        }
+
+        func settle(_ result: Result<T, CapturedError>) {
+            lock.lock()
+            guard !settled else { return lock.unlock() }
+            settled = true
+            let waiting = continuation
+            continuation = nil
+            self.result = result
+            lock.unlock()
+            if let waiting { Self.deliver(result, to: waiting) }
+        }
+
+        /// Unpacked rather than handed over whole: `resume(with:)` wants a Result whose
+        /// failure type is `any Error`, which is not Sendable and so cannot cross to here.
+        private static func deliver(_ result: Result<T, CapturedError>,
+                                    to continuation: CheckedContinuation<T, any Error>) {
+            switch result {
+            case .success(let value): continuation.resume(returning: value)
+            case .failure(let error): continuation.resume(throwing: error)
+            }
+        }
     }
 
     /// `SCStream` isn't marked Sendable, but `stopCapture()` is safe to call from any
