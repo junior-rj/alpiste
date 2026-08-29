@@ -156,11 +156,14 @@ enum MeetingWatcher {
         }
         var objects = [AudioObjectID](repeating: 0,
                                       count: Int(size) / MemoryLayout<AudioObjectID>.size)
+        // Declare what was actually allocated rather than reusing the earlier reading, and
+        // read back how much of it was filled: the list can change between the two calls.
+        size = UInt32(objects.count * MemoryLayout<AudioObjectID>.size)
         guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject),
                                          &addr, 0, nil, &size, &objects) == noErr else {
             return []
         }
-        return objects.compactMap { object in
+        return objects.prefix(Int(size) / MemoryLayout<AudioObjectID>.size).compactMap { object in
             guard let bundleID = stringProperty(object, kAudioProcessPropertyBundleID) else {
                 return nil
             }
@@ -177,6 +180,42 @@ enum MeetingWatcher {
             .filter { $0.isRunningInput }
             .first { classify(bundleID: $0.bundleID, meetingApps: meetingApps) == .meeting }?
             .bundleID
+    }
+
+    // MARK: - Session bookkeeping
+
+    /// Pure: whether the microphone session running right now has already been answered.
+    /// Covered by `--selftest`.
+    ///
+    /// A plain boolean here is what silently swallowed the meeting that began while the
+    /// previous one was still being transcribed: the flag stayed true from the call
+    /// before, the microphone never went quiet in between so nothing re-armed it, and the
+    /// new meeting was never offered and never logged. Identity, not a flag: a session
+    /// that ended is a different session from the one that follows it.
+    static func alreadyOffered(session: Date?, offered: Date?) -> Bool {
+        guard let session, let offered else { return false }
+        return session == offered
+    }
+
+    /// Pure: how long the microphone has been quiet. Covered by `--selftest`.
+    ///
+    /// Never having seen it active is not the same as it having been idle forever, and
+    /// reading it as infinity let a monitor that had just been switched back on stop a
+    /// recording that was still running.
+    static func idleInterval(since lastActivity: Date?, now: Date) -> TimeInterval {
+        guard let lastActivity else { return 0 }
+        return now.timeIntervalSince(lastActivity)
+    }
+
+    /// Pure: whether a recording has run long enough that it has to stop even though the
+    /// microphone is still live. Covered by `--selftest`.
+    ///
+    /// The overrun extension has no natural end: a meeting tab left open after everyone
+    /// has gone keeps the device, every tick pushes the stop date out by another block,
+    /// and the resulting capture outruns whisper's own four-hour ceiling.
+    static func exceededMaximum(startedAt: Date?, now: Date, maximum: TimeInterval) -> Bool {
+        guard let startedAt else { return false }
+        return now.timeIntervalSince(startedAt) >= maximum
     }
 
     private static func propertyAddress(
@@ -228,16 +267,19 @@ enum MeetingMonitor {
     /// stretch on mute must never cut a meeting that is still running.
     private static let idleStopWithEvent: TimeInterval = 15 * 60
 
-    private static var ticker: Timer?
     private static var micActiveSince: Date?
     private static var lastMicActivity: Date?
-    /// The call underway has already been offered, whether it was accepted, declined or
-    /// timed out. Not merely "declined": a recording that fails to start would otherwise
-    /// leave the call live with nothing suppressing the panel, and it would reappear on
-    /// every tick.
-    private static var offered = false
+    /// A recording the watcher started has to end even if the microphone never goes
+    /// quiet, because the overrun extension on its own never stops giving out blocks.
+    private static let maxRecording: TimeInterval = 4 * 3600
+
+    private static var ticker: Timer?
+    /// Which microphone session has already been answered, by its start time, rather than
+    /// whether *a* session was. See `MeetingWatcher.alreadyOffered`.
+    private static var offeredSession: Date?
     private static var startedByWatcher = false
     private static var autoStopAt: Date?
+    private static var recordingStartedAt: Date?
 
     static func start() {
         guard ticker == nil else { return }
@@ -255,7 +297,12 @@ enum MeetingMonitor {
         MeetingPrompt.dismiss()
         micActiveSince = nil
         lastMicActivity = nil
-        offered = false
+        offeredSession = nil
+        // A monitor that is not watching owns no schedule either. Left behind,
+        // `startedByWatcher` and a stale `autoStopAt` meant switching the toggle off and
+        // back on during a call could stop the live recording on the very next tick, as
+        // soon as the meeting app happened not to be holding the device at that instant.
+        clearRecordingState()
         Log.write("meeting watcher: stopped watching")
     }
 
@@ -271,7 +318,23 @@ enum MeetingMonitor {
             }
             lastMicActivity = now
         }
-        let idleFor = lastMicActivity.map { now.timeIntervalSince($0) } ?? .infinity
+        let idleFor = MeetingWatcher.idleInterval(since: lastMicActivity, now: now)
+
+        // The call is over, so close the session. This runs above every early return on
+        // purpose: a recording and the pipeline behind it outlast the meeting that
+        // produced them, and holding the session open across both is what made the *next*
+        // meeting invisible. It started while whisper was still working, the microphone
+        // therefore never went idle, the re-arm below the returns never ran, and the call
+        // was neither offered nor logged.
+        if idleFor >= callEndGrace, micActiveSince != nil {
+            // A panel still up is now offering to record a call that has already ended,
+            // and clicking Record would capture the silence after it.
+            if MeetingPrompt.isShowing {
+                Log.write("meeting watcher: the call ended before the prompt was answered")
+                MeetingPrompt.dismiss()
+            }
+            micActiveSince = nil
+        }
 
         let state = AppState.shared
         // Cheap, and it means granting access in System Settings is reflected in the menu
@@ -281,6 +344,10 @@ enum MeetingMonitor {
             // Recording started from the menu while the panel was still up: the question
             // has been answered, so take it off the screen.
             if MeetingPrompt.isShowing { MeetingPrompt.dismiss() }
+            // Whatever holds the microphone now is what is being recorded, so it must not
+            // be offered again once this recording ends. Without this the panel came back
+            // for the very call the user had just stopped recording by hand.
+            offeredSession = micActiveSince
             if startedByWatcher { considerAutoStop(now: now, idleFor: idleFor) }
             return
         }
@@ -289,28 +356,18 @@ enum MeetingMonitor {
         if startedByWatcher, !state.isBusy { clearRecordingState() }
         guard !state.isBusy else { return }
 
-        // The call is over: re-arm, so the next meeting is offered again.
-        if idleFor >= callEndGrace {
-            // A panel still up is now offering to record a call that has already ended,
-            // and clicking Record would capture the silence after it.
-            if MeetingPrompt.isShowing {
-                Log.write("meeting watcher: the call ended before the prompt was answered")
-                MeetingPrompt.dismiss()
-            }
-            micActiveSince = nil
-            offered = false
-        }
-
-        guard MeetingWatcher.shouldPrompt(activeSince: micActiveSince,
-                                          now: now,
-                                          debounce: Settings.debounce,
-                                          suppressed: offered)
+        guard MeetingWatcher.shouldPrompt(
+                  activeSince: micActiveSince,
+                  now: now,
+                  debounce: Settings.debounce,
+                  suppressed: MeetingWatcher.alreadyOffered(session: micActiveSince,
+                                                            offered: offeredSession))
         else { return }
         offer(now: now)
     }
 
     private static func offer(now: Date) {
-        offered = true
+        offeredSession = micActiveSince
         let event = MeetingCalendar.currentMeeting(at: now)
         // The title is meeting content and never reaches the log; whether one was matched
         // is a decision, and that does.
@@ -328,6 +385,7 @@ enum MeetingMonitor {
 
     private static func accept(event: MeetingWatcher.CalendarEvent?, now: Date) {
         startedByWatcher = true
+        recordingStartedAt = now
         if let event {
             let stopAt = MeetingWatcher.autoStopDate(eventEnd: event.end,
                                                     startedAt: now,
@@ -344,6 +402,15 @@ enum MeetingMonitor {
     }
 
     private static func considerAutoStop(now: Date, idleFor: TimeInterval) {
+        // Before anything else: the extension below hands out blocks for as long as the
+        // microphone is live, and a meeting tab nobody closed keeps it live indefinitely.
+        if MeetingWatcher.exceededMaximum(startedAt: recordingStartedAt, now: now,
+                                          maximum: maxRecording) {
+            Log.write("meeting watcher: recording reached the "
+                        + "\(Int(maxRecording / 3600))h ceiling, stopping")
+            finish()
+            return
+        }
         let idleLimit = autoStopAt == nil ? idleStopWithoutEvent : idleStopWithEvent
         if idleFor >= idleLimit {
             Log.write("meeting watcher: microphone idle for "
@@ -355,7 +422,10 @@ enum MeetingMonitor {
         // it another block rather than cutting it off mid-sentence.
         guard let stopAt = autoStopAt, now >= stopAt else { return }
         if idleFor < callEndGrace {
-            autoStopAt = stopAt.addingTimeInterval(Settings.overrunExtension)
+            // From `now`, not from `stopAt`: after a sleep/wake gap the stop date can be
+            // well in the past, and extending from it would need one tick per block just
+            // to catch up with the present.
+            autoStopAt = max(now, stopAt).addingTimeInterval(Settings.overrunExtension)
             Log.write("meeting watcher: past the calendar end but the call is still live, "
                         + "extending by \(Int(Settings.overrunExtension / 60))m")
             return
@@ -372,6 +442,7 @@ enum MeetingMonitor {
     private static func clearRecordingState() {
         startedByWatcher = false
         autoStopAt = nil
+        recordingStartedAt = nil
     }
 
     /// Tunables, read from `~/.alpiste/.env` at each use so a change takes effect without a

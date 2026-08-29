@@ -988,6 +988,42 @@ enum SelfTest {
         let landed = try? await Recorder.withDeadline(30, "selftest") { 7 }
         expect(landed == 7, "withDeadline: a result that arrives in time comes straight back")
 
+        // Back-to-back meetings, the most ordinary calendar there is. A boolean "already
+        // offered" stayed true from the first call through the second, because the
+        // microphone never went idle while whisper was still working on the first, and the
+        // second meeting was never offered and never logged.
+        let firstCall = joined
+        let secondCall = joined.addingTimeInterval(3600)
+        expect(MeetingWatcher.alreadyOffered(session: firstCall, offered: firstCall),
+               "alreadyOffered: the call already answered stays quiet")
+        expect(!MeetingWatcher.alreadyOffered(session: secondCall, offered: firstCall),
+               "alreadyOffered: the meeting that follows is a new session and is offered")
+        expect(!MeetingWatcher.alreadyOffered(session: firstCall, offered: nil),
+               "alreadyOffered: nothing answered yet")
+        expect(!MeetingWatcher.alreadyOffered(session: nil, offered: firstCall),
+               "alreadyOffered: no session on the microphone is never suppressed")
+
+        // "Never seen active" read as "idle forever" stopped a live recording the moment
+        // the toggle was switched back on mid-call.
+        expect(MeetingWatcher.idleInterval(since: nil, now: joined) == 0,
+               "idleInterval: a microphone never seen active does not count as idle")
+        expect(MeetingWatcher.idleInterval(since: joined,
+                                           now: joined.addingTimeInterval(90)) == 90,
+               "idleInterval: measured from the last activity")
+
+        // The forgotten meeting tab: the browser holds the microphone, every tick hands
+        // out another block, and the capture outruns whisper's own four-hour ceiling.
+        expect(!MeetingWatcher.exceededMaximum(startedAt: joined,
+                                               now: joined.addingTimeInterval(3600),
+                                               maximum: 4 * 3600),
+               "exceededMaximum: a long meeting still runs")
+        expect(MeetingWatcher.exceededMaximum(startedAt: joined,
+                                              now: joined.addingTimeInterval(4 * 3600),
+                                              maximum: 4 * 3600),
+               "exceededMaximum: the ceiling stops a recording nothing else would")
+        expect(!MeetingWatcher.exceededMaximum(startedAt: nil, now: joined, maximum: 1),
+               "exceededMaximum: a recording the watcher did not start has no ceiling")
+
         // The rescue is the last line before a recording is gone for good, and what it
         // could *not* move is the half that matters: reporting only the successes let the
         // caller delete the capture directory anyway, which destroyed the other track on a
