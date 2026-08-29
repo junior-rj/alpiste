@@ -26,6 +26,14 @@ enum Notes {
         async -> (file: URL?, problems: [String]) {
         var problems: [String] = []
 
+        // A source that lost buffers still leaves a file that opens and plays, so nothing
+        // downstream can tell the difference. Unsaid, the note reads as a complete meeting
+        // that happens to be short.
+        for source in capture.incomplete {
+            problems.append("Part of the \(source) track was lost while recording "
+                            + "(details in \(Log.file.lastPathComponent)).")
+        }
+
         do {
             try FileManager.default.createDirectory(at: outputDirectory,
                                                     withIntermediateDirectories: true)
