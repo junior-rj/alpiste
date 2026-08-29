@@ -128,6 +128,11 @@ enum Notes {
             try markdown.write(to: destination, atomically: true, encoding: .utf8)
         } catch {
             problems.append("Could not write \(destination.path): \(error.localizedDescription)")
+            // The Desktop, deliberately, and deliberately not swept afterwards: the
+            // backfill only ever looks inside `outputDirectory`, and turning it loose on
+            // the Desktop would mean rewriting markdown files this app never wrote. A note
+            // that lands here always carries an alert naming its path, and
+            // `--regenerate <path>` still works on it by hand.
             let fallback = FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent("Desktop/\(stem).md")
             if (try? markdown.write(to: fallback, atomically: true, encoding: .utf8)) != nil {
@@ -366,8 +371,25 @@ enum Notes {
         let language = transcriptionLanguage(env)
         if language != "auto" { field("language", language) }
         body.append("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"\(payload.lastPathComponent)\"\r\nContent-Type: application/octet-stream\r\n\r\n".data(using: .utf8)!)
-        body.append(try Data(contentsOf: payload))
-        body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
+
+        // Staged on disk rather than assembled in memory. An hour of 16 kHz wav is about
+        // 115 MB; as one `Data` the multipart body holds a second copy of it, and
+        // URLSession then makes a third when it takes the request.
+        let multipart = payload.deletingLastPathComponent()
+            .appendingPathComponent("upload-\(boundary).multipart")
+        FileManager.default.createFile(atPath: multipart.path, contents: nil)
+        guard let sink = try? FileHandle(forWritingTo: multipart) else {
+            throw Failure.badResponse("could not stage the upload beside \(payload.lastPathComponent)")
+        }
+        defer {
+            try? sink.close()
+            try? FileManager.default.removeItem(at: multipart)
+        }
+        try sink.write(contentsOf: body)
+        // Mapped, so the kernel pages the audio through instead of resident memory.
+        try sink.write(contentsOf: try Data(contentsOf: payload, options: .mappedIfSafe))
+        try sink.write(contentsOf: "\r\n--\(boundary)--\r\n".data(using: .utf8)!)
+        try sink.close()
 
         guard let endpoint = URL(string: provider.url) else {
             throw Failure.badResponse("invalid transcription endpoint: \(provider.url)")
@@ -378,7 +400,7 @@ enum Notes {
         request.setValue("Bearer \(provider.key)", forHTTPHeaderField: "Authorization")
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 
-        let data = try await Self.fetchWithRetry(request, uploading: body)
+        let data = try await Self.fetchWithRetry(request, uploadingFile: multipart)
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let text = json["text"] as? String else {
             throw Failure.badResponse("transcription response had no `text` field")
@@ -521,11 +543,24 @@ enum Notes {
         ])
 
         let data = try await Self.fetchWithRetry(request)
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let candidates = json["candidates"] as? [[String: Any]],
-              let content = candidates.first?["content"] as? [String: Any],
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw Failure.badResponse("Gemini returned something that was not JSON")
+        }
+        guard let candidate = (json["candidates"] as? [[String: Any]])?.first else {
+            // A prompt refused outright comes back with no candidates and the reason in
+            // promptFeedback. These codes are Google's, never transcript text.
+            let blocked = (json["promptFeedback"] as? [String: Any])?["blockReason"] as? String
+            throw Failure.badResponse("Gemini returned no candidates"
+                                      + (blocked.map { " (blocked: \($0))" } ?? ""))
+        }
+        guard let content = candidate["content"] as? [String: Any],
               let parts = content["parts"] as? [[String: Any]] else {
-            throw Failure.badResponse("Gemini returned no candidates")
+            // A candidate with no parts is the safety filter, or a budget spent entirely
+            // on thinking tokens. `finishReason` says which, and "no candidates" was
+            // simply the wrong answer: there was one, it just carried nothing.
+            let reason = candidate["finishReason"] as? String ?? "unknown"
+            throw Failure.badResponse("Gemini returned an empty candidate "
+                                      + "(finishReason: \(reason))")
         }
         let text = parts.compactMap { $0["text"] as? String }.joined()
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -813,9 +848,12 @@ enum Notes {
     /// makes this double as the transcription upload's retry path, since a dropped
     /// 429 there loses the whole transcript, not just the summary.
     private static func fetchWithRetry(_ request: URLRequest, uploading body: Data? = nil,
+                                       uploadingFile file: URL? = nil,
                                        attempts: Int = 4) async throws -> Data {
         func send() async throws -> (Data, URLResponse) {
-            if let body {
+            if let file {
+                try await URLSession.shared.upload(for: request, fromFile: file)
+            } else if let body {
                 try await URLSession.shared.upload(for: request, from: body)
             } else {
                 try await URLSession.shared.data(for: request)
@@ -940,21 +978,40 @@ enum Tool {
         }
         try process.run()
 
-        let finishedInTime = await withTaskGroup(of: Bool.self) { group in
-            group.addTask { for await _ in stream { return true }; return true }
+        // Three outcomes, not two. A cancelled enclosing task also ends the stream, and
+        // reading `terminationStatus` off a process that is still running is an
+        // uncatchable Foundation trap, so "the stream ended" cannot be read as "it exited".
+        enum Outcome { case exited, timedOut, cancelled }
+        let outcome = await withTaskGroup(of: Outcome.self) { group in
+            group.addTask {
+                for await _ in stream { return .exited }
+                return Task.isCancelled ? .cancelled : .exited
+            }
             group.addTask {
                 try? await Task.sleep(for: .seconds(timeout))
-                return false
+                return Task.isCancelled ? .cancelled : .timedOut
             }
-            let first = await group.next() ?? false
+            let first = await group.next() ?? .cancelled
             group.cancelAll()
             return first
         }
 
-        if !finishedInTime {
+        // Checked before signalling: a process that exited in the instant the deadline
+        // fired has already given its pid back, and the kernel may have handed it out again.
+        func killIfAlive() {
+            guard process.isRunning else { return }
             process.terminate()
             kill(process.processIdentifier, SIGKILL)
+        }
+        switch outcome {
+        case .exited:
+            break
+        case .timedOut:
+            killIfAlive()
             throw Notes.Failure.commandFailed(label, -1, "timed out after \(Int(timeout))s")
+        case .cancelled:
+            killIfAlive()
+            throw CancellationError()
         }
 
         guard process.terminationStatus == 0 else {

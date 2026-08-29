@@ -60,14 +60,6 @@ enum Log {
         }
     }
 
-    /// Records a step and returns it, so a progress callback can log and report in one
-    /// expression instead of repeating the string.
-    @discardableResult
-    static func step(_ message: String) -> String {
-        write(message)
-        return message
-    }
-
     /// Blocks until every queued line has been written. Required before `exit()`: the
     /// `--regenerate` and `--backfill` paths would otherwise lose the very line that
     /// says how they ended.

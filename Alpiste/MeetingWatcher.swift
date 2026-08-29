@@ -316,8 +316,6 @@ enum MeetingMonitor {
         Log.write("meeting watcher: stopped watching")
     }
 
-    static var isWatching: Bool { ticker != nil }
-
     private static func tick(now: Date) {
         let onMic = MeetingWatcher.meetingAppOnMicrophone(MeetingWatcher.audioProcesses(),
                                                           meetingApps: Settings.meetingApps)

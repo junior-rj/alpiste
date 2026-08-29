@@ -870,6 +870,11 @@ enum SelfTest {
                "classify: Wispr Flow dictation never counts as a meeting")
         expect(MeetingWatcher.classify(bundleID: "com.sparrow.alpiste") == .ignored,
                "classify: Alpiste's own capture never counts as a meeting")
+        // Pinned to the real identifier rather than to a literal: renaming
+        // PRODUCT_BUNDLE_IDENTIFIER would otherwise leave the line above passing while the
+        // app quietly started feeding the detector its own capture.
+        expect(MeetingWatcher.classify(bundleID: Bundle.main.bundleIdentifier ?? "") == .ignored,
+               "classify: the deny list matches the bundle ID this build actually has")
         expect(MeetingWatcher.classify(bundleID: "com.electron.wispr-flow",
                                        meetingApps: ["com.electron.wispr-flow"]) == .ignored,
                "classify: the deny list wins over configuration")
