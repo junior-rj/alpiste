@@ -94,7 +94,7 @@ enum MeetingWatcher {
 
     /// The fields this file needs from an `EKEvent`, so the matching logic stays pure and
     /// testable without a calendar permission or a live event store.
-    struct CalendarEvent: Equatable {
+    struct CalendarEvent: Equatable, Sendable {
         let title: String
         let start: Date
         let end: Date
@@ -103,6 +103,12 @@ enum MeetingWatcher {
         /// of these depending on who sent the invite.
         let details: String
         let attendeeCount: Int
+        /// The organiser cancelled it without deleting it. EventKit's own header calls this
+        /// the only status worth trusting.
+        var isCanceled = false
+        /// You said no to it. It stays in the calendar all the same, still carrying its
+        /// conference link, still competing to name the note.
+        var isDeclined = false
     }
 
     static let conferenceHosts = [
@@ -113,6 +119,10 @@ enum MeetingWatcher {
 
     /// Pure. Covered by `--selftest`.
     static func looksLikeMeeting(_ event: CalendarEvent) -> Bool {
+        // A meeting you are not in cannot be the one you just joined, and it will happily
+        // outrank the real call: `meetingEvent` takes the latest start, so a stale 10:00
+        // all-hands beats the ad-hoc call at 10:05 and names the note after itself.
+        if event.isCanceled || event.isDeclined { return false }
         if event.isAllDay { return false }
         let details = event.details.lowercased()
         if conferenceHosts.contains(where: details.contains) { return true }
@@ -367,19 +377,24 @@ enum MeetingMonitor {
     }
 
     private static func offer(now: Date) {
+        // Claimed synchronously, before the calendar lookup is awaited, so the tick two
+        // seconds later cannot decide to offer the same session all over again.
         offeredSession = micActiveSince
-        let event = MeetingCalendar.currentMeeting(at: now)
-        // The title is meeting content and never reaches the log; whether one was matched
-        // is a decision, and that does.
-        Log.write("meeting watcher: prompting (calendar event "
-                    + (event == nil ? "not matched)" : "matched)"))
+        Task {
+            let event = await MeetingCalendar.currentMeeting(at: now)
+            // The title is meeting content and never reaches the log; whether one was
+            // matched is a decision, and that does.
+            Log.write("meeting watcher: prompting (calendar event "
+                        + (event == nil ? "not matched)" : "matched)"))
 
-        MeetingPrompt.show(subtitle: event?.title) {
-            // Date() rather than the captured `now`: the panel may have sat on screen for
-            // a minute and a half, and the auto-stop floor is measured from the recording.
-            accept(event: event, now: Date())
-        } onDecline: {
-            Log.write("meeting watcher: declined, staying quiet until this call ends")
+            MeetingPrompt.show(subtitle: event?.title) {
+                // Date() rather than the captured `now`: the panel may have sat on screen
+                // for a minute and a half, and the auto-stop floor is measured from the
+                // recording.
+                accept(event: event, now: Date())
+            } onDecline: {
+                Log.write("meeting watcher: declined, staying quiet until this call ends")
+            }
         }
     }
 

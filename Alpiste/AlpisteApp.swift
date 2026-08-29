@@ -483,6 +483,9 @@ final class AppState {
         let current = MeetingCalendar.access
         guard current != meetingCalendarStatus else { return }
         meetingCalendarStatus = current
+        // Granted in System Settings with the app already running: the store that predates
+        // the grant has to be reset, or the menu says available while every lookup is empty.
+        if current == .available { MeetingCalendar.accessBecameAvailable() }
         Log.write("meeting calendar: \(MeetingCalendar.statusDescription)")
     }
 
@@ -913,13 +916,15 @@ enum SelfTest {
                "meetingAppOnMicrophone: playing audio is not holding the microphone")
 
         func event(_ title: String, _ startOffset: TimeInterval, _ endOffset: TimeInterval,
-                   allDay: Bool = false, details: String = "", attendees: Int = 0)
+                   allDay: Bool = false, details: String = "", attendees: Int = 0,
+                   canceled: Bool = false, declined: Bool = false)
             -> MeetingWatcher.CalendarEvent {
             MeetingWatcher.CalendarEvent(title: title,
                                          start: joined.addingTimeInterval(startOffset),
                                          end: joined.addingTimeInterval(endOffset),
                                          isAllDay: allDay, details: details,
-                                         attendeeCount: attendees)
+                                         attendeeCount: attendees,
+                                         isCanceled: canceled, isDeclined: declined)
         }
         expect(MeetingWatcher.looksLikeMeeting(
                    event("x", -60, 600, details: "https://meet.google.com/abc-defg-hij")),
@@ -931,6 +936,20 @@ enum SelfTest {
         expect(!MeetingWatcher.looksLikeMeeting(
                    event("x", -60, 600, allDay: true, details: "zoom.us/j/1")),
                "looksLikeMeeting: an all-day entry is never the call you just joined")
+        // Both of these keep their conference link and their attendees, and meetingEvent
+        // takes the latest start, so a stale 10:00 all-hands outranks the ad-hoc call at
+        // 10:05 and names the note after the wrong meeting, with the wrong end time.
+        expect(!MeetingWatcher.looksLikeMeeting(
+                   event("x", -60, 600, attendees: 5, canceled: true)),
+               "looksLikeMeeting: an event the organiser cancelled is not a meeting")
+        expect(!MeetingWatcher.looksLikeMeeting(
+                   event("x", -60, 600, attendees: 5, declined: true)),
+               "looksLikeMeeting: an event you declined is not the call you just joined")
+        expect(MeetingWatcher.meetingEvent(
+                   [event("declined all-hands", -300, 1800, attendees: 40, declined: true),
+                    event("the call you joined", -60, 1800, attendees: 2)],
+                   at: joined)?.title == "the call you joined",
+               "meetingEvent: a declined event does not outrank the real call")
 
         let overlapping = [event("earlier", -3600, 3600, attendees: 2),
                            event("just started", -120, 1800, attendees: 2),
