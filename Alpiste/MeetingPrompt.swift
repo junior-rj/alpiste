@@ -72,15 +72,29 @@ enum MeetingPrompt {
     static func dismiss() {
         timeoutTask?.cancel()
         timeoutTask = nil
-        panel?.orderOut(nil)
-        panel = nil
+        guard let panel else { return }
+        self.panel = nil
+        panel.orderOut(nil)
+        // Released on the next turn of the runloop. `dismiss` is called from inside a
+        // SwiftUI button action, so dropping the last reference here would deallocate the
+        // panel and the hosting view that is still dispatching that very action.
+        DispatchQueue.main.async { _ = panel }
     }
 
     static var isShowing: Bool { panel != nil }
 
     /// Top-right, under the menu bar, near the Alpiste icon the panel is talking about.
+    ///
+    /// The screen under the pointer, not `NSScreen.main`: with no key window there is no
+    /// "main" screen worth the name, so on a two-monitor desk the panel could open on the
+    /// display the user is not looking at, and a nil would have left it in the bottom-left
+    /// corner instead of positioning it at all.
     private static func position(_ panel: NSPanel) {
-        guard let screen = NSScreen.main else { return }
+        let pointer = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { NSMouseInRect(pointer, $0.frame, false) }
+            ?? NSScreen.main
+            ?? NSScreen.screens.first
+        guard let screen else { return }
         let area = screen.visibleFrame
         let size = panel.frame.size
         panel.setFrameOrigin(NSPoint(x: area.maxX - size.width - 16,
@@ -113,7 +127,11 @@ private struct PromptView: View {
             HStack {
                 Spacer()
                 Button("Not now", action: decline)
-                    .keyboardShortcut(.cancelAction)
+                // `.defaultAction` is here for the prominent styling it gives Record, not
+                // for the Return key: a non-activating panel shown with
+                // `orderFrontRegardless` never becomes key, so no keyboard shortcut in
+                // this view can ever fire. Making it key would take the keyboard away
+                // from the call, which is the whole thing this panel avoids.
                 Button("Record", action: accept)
                     .keyboardShortcut(.defaultAction)
             }

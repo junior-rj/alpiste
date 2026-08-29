@@ -11,7 +11,7 @@ import Foundation
 enum Backfill {
     /// Only recent notes. A failure that will never resolve — a transcript the model
     /// keeps rejecting, say — would otherwise be retried on every launch forever.
-    static let window: TimeInterval = 7 * 24 * 3600
+    nonisolated static let window: TimeInterval = 7 * 24 * 3600
 
     /// Spacing after a failed recording: wide enough for a provider outage to end
     /// between passes, and the last attempt still lands within the hour.
@@ -51,7 +51,7 @@ enum Backfill {
             // would leave the note broken with nobody told. The list is re-read rather
             // than remembered, so the alert names only what is still missing.
             Log.write("backfill: retries exhausted, notes still pending")
-            AppState.shared.backfillGaveUp(pendingFiles())
+            AppState.shared.backfillGaveUp(await pendingFiles())
         }
     }
 
@@ -64,7 +64,7 @@ enum Backfill {
         sweeping = true
         defer { sweeping = false }
 
-        let pending = pendingFiles()
+        let pending = await pendingFiles()
         guard !pending.isEmpty else { return Result() }
         Log.write("backfill: \(pending.count) note(s) pending — "
                     + pending.map(\.lastPathComponent).joined(separator: ", "))
@@ -94,7 +94,14 @@ enum Backfill {
     }
 
     /// Recent `.md` files that have a transcript but no summary, oldest first.
-    private static func pendingFiles() -> [URL] {
+    ///
+    /// Off the main actor: this reads every recent note in full, and it runs at launch,
+    /// where a season of meetings turns into a visible hitch in the menu bar.
+    private static func pendingFiles() async -> [URL] {
+        await Task.detached { scan() }.value
+    }
+
+    nonisolated private static func scan() -> [URL] {
         let cutoff = Date().addingTimeInterval(-window)
         let keys: [URLResourceKey] = [.contentModificationDateKey]
         guard let entries = try? FileManager.default.contentsOfDirectory(
@@ -107,6 +114,12 @@ enum Backfill {
             guard let contents = try? String(contentsOf: entry, encoding: .utf8) else { continue }
             if Notes.pendingSummary(markdown: contents) { pending.append(entry) }
         }
-        return pending.sorted { $0.lastPathComponent < $1.lastPathComponent }
+        // By the timestamp first, then the whole name: the stem is the start time, but a
+        // same-minute collision suffix ("-2") sorts before the extension's dot, so plain
+        // name order puts the second recording of a minute ahead of the first.
+        return pending.sorted {
+            ($0.lastPathComponent.prefix(15), $0.lastPathComponent)
+                < ($1.lastPathComponent.prefix(15), $1.lastPathComponent)
+        }
     }
 }
