@@ -13,10 +13,63 @@ import ScreenCaptureKit
 /// CAF rather than WAV: it accepts any format without conversion and has no 4 GB ceiling,
 /// so a long meeting can't silently truncate.
 enum Recorder {
-    struct Capture {
+    struct Capture: Sendable {
         let directory: URL
         let systemAudio: URL?
         let microphone: URL?
+        /// Sources whose writes failed part-way through. The file is there and plays, but
+        /// part of the meeting never reached it, and without saying so the note reads as
+        /// a complete meeting that happens to be short.
+        var incomplete: [String] = []
+    }
+
+    /// A capture an earlier run never turned into a note.
+    struct Orphan: Sendable {
+        let capture: Capture
+        let startedAt: Date
+    }
+
+    /// Application Support rather than the temp directory: a multi-hour meeting can reach
+    /// several GB, and macOS is free to purge temporaryDirectory under disk pressure,
+    /// which is exactly when a large in-progress recording is most at risk.
+    static var capturesDirectory: URL {
+        Notes.supportDirectory.appendingPathComponent("captures", isDirectory: true)
+    }
+
+    /// Captures left behind by a run that never wrote its note: a crash, a power cut, or
+    /// the Force Quit that the unquittable start window used to push people into. The
+    /// audio sits here whole, and until this existed nothing ever looked at it again, so
+    /// the meeting was lost in practice while being perfectly intact on disk.
+    ///
+    /// Only `alpiste-` directories: `--retranscribe` keeps its scratch space alongside
+    /// them, and mistaking that for an orphan would re-process a note already on disk.
+    /// The root is a parameter so `--selftest` can exercise it against a scratch tree.
+    static func orphanedCaptures(in root: URL = capturesDirectory) -> [Orphan] {
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: [.creationDateKey])
+        else { return [] }
+
+        var orphans: [Orphan] = []
+        for entry in entries where entry.lastPathComponent.hasPrefix("alpiste-") {
+            func audio(_ name: String) -> URL? {
+                let candidate = entry.appendingPathComponent(name)
+                let size = (try? candidate.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                return size > 0 ? candidate : nil
+            }
+            let capture = Capture(directory: entry,
+                                  systemAudio: audio("system.caf"),
+                                  microphone: audio("mic.caf"))
+            guard capture.systemAudio != nil || capture.microphone != nil else {
+                // A start that died before any audio arrived. Nothing to recover, and
+                // leaving it would accumulate empty directories forever.
+                try? FileManager.default.removeItem(at: entry)
+                continue
+            }
+            let created = (try? entry.resourceValues(forKeys: [.creationDateKey]).creationDate)
+                ?? Date()
+            orphans.append(Orphan(capture: capture, startedAt: created))
+        }
+        return orphans.sorted { $0.startedAt < $1.startedAt }
     }
 
     enum Failure: LocalizedError {
@@ -82,11 +135,8 @@ enum Recorder {
             return FilterBox(filter: SCContentFilter(display: display, excludingWindows: []))
         }.filter
 
-        // Application Support rather than the temp directory: a multi-hour meeting can
-        // reach several GB, and macOS is free to purge temporaryDirectory under disk
-        // pressure, which is exactly when a large in-progress recording is most at risk.
-        let directory = Notes.supportDirectory
-            .appendingPathComponent("captures/alpiste-\(UUID().uuidString)", isDirectory: true)
+        let directory = capturesDirectory
+            .appendingPathComponent("alpiste-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
         let config = SCStreamConfiguration()
@@ -108,9 +158,16 @@ enum Recorder {
         let stream = SCStream(filter: filter, configuration: config, delegate: tap)
 
         let queue = DispatchQueue(label: "com.sparrow.alpiste.audio")
-        try stream.addStreamOutput(tap, type: .screen, sampleHandlerQueue: queue)
-        try stream.addStreamOutput(tap, type: .audio, sampleHandlerQueue: queue)
-        try stream.addStreamOutput(tap, type: .microphone, sampleHandlerQueue: queue)
+        do {
+            try stream.addStreamOutput(tap, type: .screen, sampleHandlerQueue: queue)
+            try stream.addStreamOutput(tap, type: .audio, sampleHandlerQueue: queue)
+            try stream.addStreamOutput(tap, type: .microphone, sampleHandlerQueue: queue)
+        } catch {
+            // Nothing was started, so there is no replayd session to release; the empty
+            // directory would just pile up next to the real captures.
+            try? FileManager.default.removeItem(at: directory)
+            throw error
+        }
 
         do {
             // A wedged replayd or WindowServer can leave `startCapture` outstanding
@@ -133,6 +190,15 @@ enum Recorder {
             // with a dead client, then grabbed the microphone on the next device wake;
             // quitting the app did not release it. Whether replayd honours the stop is
             // exactly what the log line is for, so the result is never swallowed.
+            //
+            // `finish()` comes first here, unlike the success path: it is what sets the
+            // tap's stopped flag, and a `didStopWithError` delivered while the stop is in
+            // flight would otherwise be reported upward as a stream that died on its own.
+            // Harmless today, since there is no session yet, but this is the retry path
+            // and one stray callback surviving into the second attempt would stop a
+            // healthy recording. Trailing buffers do not matter: the directory is about
+            // to be deleted.
+            _ = tap.finish()
             do {
                 try await stream.stopCapture()
                 Log.write("capture start failed — \(error.localizedDescription); stopCapture ok")
@@ -140,7 +206,6 @@ enum Recorder {
                 Log.write("capture start failed — \(error.localizedDescription); "
                           + "stopCapture also failed — \(stopError.localizedDescription)")
             }
-            _ = tap.finish()
             try? FileManager.default.removeItem(at: directory)
             throw error
         }
@@ -236,7 +301,18 @@ enum Recorder {
         let directory: URL
 
         func stop() async -> Capture {
-            try? await stream.stopCapture()
+            do {
+                try await stream.stopCapture()
+            } catch {
+                // Not swallowed, for the same reason the start's failure path does not
+                // swallow it: SCK runs the capture inside replayd, and a stop the daemon
+                // never processed leaves it holding the microphone with a dead client,
+                // which quitting Alpiste does not release. Without this line the log has
+                // nothing to point at replayd with when the mic stays busy (2026-08-27).
+                Log.write("stopCapture failed on a normal stop — \(error.localizedDescription); "
+                          + "if the microphone stays busy with no app holding it, "
+                          + "kill -9 the replayd process")
+            }
             return tap.finish()
         }
     }
@@ -250,6 +326,8 @@ final class AudioTap: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
     private let directory: URL
     private let lock = NSLock()
     private var writers: [SCStreamOutputType: AVAudioFile] = [:]
+    /// Counted per source so the log gets one line, not one per buffer at 48 kHz.
+    private var writeFailures: [SCStreamOutputType: Int] = [:]
     private var stopped = false
     private let onStop: @Sendable (Error) -> Void
 
@@ -293,7 +371,7 @@ final class AudioTap: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
                                        interleaved: format.isInterleaved)
                 writers[type] = file
             } catch {
-                NSLog("alpiste: could not open \(name): \(error)")
+                noteFailure(type, name, "could not open", error)
                 return
             }
         }
@@ -306,8 +384,20 @@ final class AudioTap: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
                 try file.write(from: pcm)
             }
         } catch {
-            NSLog("alpiste: write to \(name) failed: \(error)")
+            noteFailure(type, name, "write to", error)
         }
+    }
+
+    /// Called with the lock held. The first failure per source is logged and the rest are
+    /// only counted: a disk that filled up mid-meeting, or a format change when the input
+    /// switches to AirPods, throws for every buffer that follows.
+    private func noteFailure(_ type: SCStreamOutputType, _ name: String,
+                             _ what: String, _ error: any Error) {
+        let seen = (writeFailures[type] ?? 0) + 1
+        writeFailures[type] = seen
+        guard seen == 1 else { return }
+        Log.write("\(what) \(name) failed — \(error.localizedDescription); "
+                  + "that part of the recording is being lost")
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
@@ -320,12 +410,14 @@ final class AudioTap: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
         if !alreadyStopped { onStop(error) }
     }
 
-    /// Closes the files and reports which ones actually received audio.
+    /// Closes the files and reports which ones actually received audio, and which of
+    /// those are missing part of what was said.
     func finish() -> Recorder.Capture {
         lock.lock()
         stopped = true
         // Dropping the AVAudioFile references flushes and closes them.
         let written = Set(writers.keys)
+        let failures = writeFailures
         writers.removeAll()
         lock.unlock()
 
@@ -336,8 +428,20 @@ final class AudioTap: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
             return size > 0 ? candidate : nil
         }
 
+        let lost = [(SCStreamOutputType.audio, "system audio"),
+                    (SCStreamOutputType.microphone, "microphone")]
+            .compactMap { type, label -> (label: String, count: Int)? in
+                guard let count = failures[type], count > 0 else { return nil }
+                return (label, count)
+            }
+        if !lost.isEmpty {
+            Log.write("capture finished with lost buffers: "
+                      + lost.map { "\($0.label) (\($0.count))" }.joined(separator: ", "))
+        }
+
         return Recorder.Capture(directory: directory,
                                 systemAudio: url(.audio, "system.caf"),
-                                microphone: url(.microphone, "mic.caf"))
+                                microphone: url(.microphone, "mic.caf"),
+                                incomplete: lost.map(\.label))
     }
 }

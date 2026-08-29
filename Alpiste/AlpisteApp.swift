@@ -549,7 +549,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.contains("--prompt-demo") { Self.promptDemo(); return }
 
         Backfill.sweepAtLaunch()
+        Self.recoverOrphanedCaptures()
         AppState.shared.resumeMeetingWatcherIfEnabled()
+    }
+
+    /// Captures an earlier run never turned into a note, because it crashed, lost power,
+    /// or was force-quit. Nothing used to look at them again: the meeting was lost in
+    /// practice while sitting whole on disk, and the directories piled up unseen.
+    ///
+    /// Safe to run here and only here. Everything in `captures/` at launch predates this
+    /// session, so no recording in progress can be swept up by it.
+    private static func recoverOrphanedCaptures() {
+        let orphans = Recorder.orphanedCaptures()
+        guard !orphans.isEmpty else { return }
+        Log.write("recovery: \(orphans.count) capture(s) left behind by an earlier run")
+        Task {
+            for orphan in orphans {
+                let result = await Notes.process(orphan.capture, startedAt: orphan.startedAt)
+                if let file = result.file {
+                    Log.write("recovery: wrote \(file.lastPathComponent)")
+                    AppState.shared.noteBackfilled(file)
+                } else {
+                    Log.write("recovery: could not save "
+                                + "\(orphan.capture.directory.lastPathComponent) — "
+                                + result.problems.joined(separator: "; "))
+                }
+            }
+        }
     }
 
     /// `Alpiste --prompt-demo`: shows the meeting prompt and reports which button was
@@ -961,6 +987,31 @@ enum SelfTest {
         }
         let landed = try? await Recorder.withDeadline(30, "selftest") { 7 }
         expect(landed == 7, "withDeadline: a result that arrives in time comes straight back")
+
+        // A capture the app never turned into a note is the last place a recording can
+        // hide, and --retranscribe keeps its scratch space in the same folder: sweeping
+        // that up would re-process a note already on disk.
+        let captures = FileManager.default.temporaryDirectory
+            .appendingPathComponent("alpiste-selftest-captures-\(UUID().uuidString)")
+        func makeCapture(_ name: String, bytes: Int) -> URL {
+            let directory = captures.appendingPathComponent(name)
+            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            FileManager.default.createFile(atPath: directory.appendingPathComponent("system.caf").path,
+                                           contents: Data(repeating: 0, count: bytes))
+            return directory
+        }
+        let stranded = makeCapture("alpiste-stranded", bytes: 1024)
+        let empty = makeCapture("alpiste-empty", bytes: 0)
+        let scratch = makeCapture("retranscribe-scratch", bytes: 1024)
+        let orphans = Recorder.orphanedCaptures(in: captures)
+        expect(orphans.count == 1 && orphans.first?.capture.directory.lastPathComponent
+                == stranded.lastPathComponent,
+               "orphanedCaptures: finds the capture an interrupted run left behind")
+        expect(!FileManager.default.fileExists(atPath: empty.path),
+               "orphanedCaptures: clears a directory that never received audio")
+        expect(FileManager.default.fileExists(atPath: scratch.path),
+               "orphanedCaptures: leaves the --retranscribe scratch space alone")
+        try? FileManager.default.removeItem(at: captures)
 
         expect(Tool.find("ffmpeg") != nil, "tools: ffmpeg found without a login PATH")
 
