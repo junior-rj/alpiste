@@ -988,6 +988,79 @@ enum SelfTest {
         let landed = try? await Recorder.withDeadline(30, "selftest") { 7 }
         expect(landed == 7, "withDeadline: a result that arrives in time comes straight back")
 
+        // The rescue is the last line before a recording is gone for good, and what it
+        // could *not* move is the half that matters: reporting only the successes let the
+        // caller delete the capture directory anyway, which destroyed the other track on a
+        // partial move and, on a total failure, deleted the very folder the note had just
+        // told the user the audio was left in.
+        let rescueRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("alpiste-selftest-rescue-\(UUID().uuidString)")
+        func rescueCase(_ name: String, mic: Bool, blocked: Bool) -> Notes.Rescue {
+            let from = rescueRoot.appendingPathComponent("\(name)-capture")
+            let to = rescueRoot.appendingPathComponent("\(name)-notes")
+            for directory in [from, to] {
+                try? FileManager.default.createDirectory(at: directory,
+                                                         withIntermediateDirectories: true)
+            }
+            func write(_ url: URL) -> URL {
+                FileManager.default.createFile(atPath: url.path, contents: Data([0, 1, 2, 3]))
+                return url
+            }
+            let system = write(from.appendingPathComponent("system.caf"))
+            let microphone = mic ? write(from.appendingPathComponent("mic.caf")) : nil
+            // An existing destination is what a move actually fails on, and a colliding
+            // rescued file from an earlier failure is the realistic way to get one.
+            if blocked { _ = write(to.appendingPathComponent("\(name)-mic.caf")) }
+            return Notes.rescueRawAudio(Recorder.Capture(directory: from,
+                                                         systemAudio: system,
+                                                         microphone: microphone),
+                                        stem: name, to: to)
+        }
+        let bothMoved = rescueCase("full", mic: true, blocked: false)
+        expect(bothMoved.complete, "rescueRawAudio: both tracks moved, the capture may go")
+        expect(bothMoved.audioFile == "full-system.caf",
+               "rescueRawAudio: names the rescued file so --retranscribe can find it")
+        let partial = rescueCase("partial", mic: true, blocked: true)
+        expect(!partial.complete,
+               "rescueRawAudio: a track that could not be moved keeps the capture alive")
+        expect(partial.problems.contains { $0.contains("mic.caf") },
+               "rescueRawAudio: says which file was left behind")
+        let systemOnly = rescueCase("solo", mic: false, blocked: false)
+        expect(systemOnly.complete && systemOnly.audioFile == "solo-system.caf",
+               "rescueRawAudio: an absent microphone is not a failure to move it")
+        try? FileManager.default.removeItem(at: rescueRoot)
+
+        // whisper-cli's -np means "print nothing but the results", and the results are the
+        // transcript. Tool.run puts the tail of that log into the error message, which is
+        // echoed to alpiste.log and shown in an alert.
+        let runRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("alpiste-selftest-run-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: runRoot, withIntermediateDirectories: true)
+        let echo = URL(fileURLWithPath: "/bin/echo")
+        try? await Tool.run(echo, ["what was said in the meeting"], in: runRoot, label: "kept")
+        try? await Tool.run(echo, ["what was said in the meeting"], in: runRoot,
+                            label: "dropped", discardStandardOutput: true)
+        func logged(_ label: String) -> String {
+            (try? String(contentsOf: runRoot.appendingPathComponent("\(label).log"),
+                         encoding: .utf8)) ?? ""
+        }
+        expect(logged("kept").contains("what was said"),
+               "Tool.run: stdout reaches the command log by default")
+        expect(!logged("dropped").contains("what was said"),
+               "Tool.run: discardStandardOutput keeps the transcript out of the log")
+        try? FileManager.default.removeItem(at: runRoot)
+
+        // Regeneration rebuilds the file by hand instead of through markdown(); if the two
+        // compositions drift, the backfill stops recognising the notes it just wrote.
+        if let parts = Notes.split(markdown: failed) {
+            let regenerated = parts.header + "\n\n## Summary\n- p\n"
+                + Notes.transcriptDivider + parts.transcript + "\n"
+            expect(Notes.split(markdown: regenerated)?.transcript == "raw text",
+                   "regenerate: the rebuilt note still parses")
+            expect(!Notes.pendingSummary(markdown: regenerated),
+                   "regenerate: the rebuilt note stops reading as pending")
+        }
+
         // A capture the app never turned into a note is the last place a recording can
         // hide, and --retranscribe keeps its scratch space in the same folder: sweeping
         // that up would re-process a note already on disk.

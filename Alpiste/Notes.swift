@@ -44,7 +44,10 @@ enum Notes {
         // A collision only happens if two recordings start in the same minute; suffix
         // rather than overwrite, since overwriting would silently destroy the earlier one.
         let stem = Self.uniqueStem(Self.stamp(startedAt)) { candidate in
-            ["md", "m4a"].contains { ext in
+            // .caf counts: a rescued raw file from an earlier failure sits in this folder
+            // under the same stem, and colliding with it is the likeliest way for the
+            // rescue's own move to fail.
+            ["md", "m4a", "caf"].contains { ext in
                 FileManager.default.fileExists(
                     atPath: outputDirectory.appendingPathComponent("\(candidate).\(ext)").path)
             }
@@ -53,18 +56,34 @@ enum Notes {
         // 1. Mix the two sources down to one keepable m4a plus the 16 kHz wav whisper needs.
         var audioFile: URL?
         var wav16k: URL?
+        // Cleared by a rescue that could not move everything: the capture directory is
+        // then the only copy of what is left, and deleting it would destroy the recording
+        // in the very branch that exists to preserve it.
+        var captureDirectoryMayGo = true
         do {
             progress("Mixing audio…")
             let mixed = try await mix(capture)
             wav16k = mixed.wav16k
             let destination = outputDirectory.appendingPathComponent("\(stem).m4a")
-            try FileManager.default.moveItem(at: mixed.m4a, to: destination)
+            do {
+                try FileManager.default.moveItem(at: mixed.m4a, to: destination)
+            } catch {
+                // The mix itself is good; only the rename failed. Falling through to the
+                // raw .caf rescue would throw away the better artifact for no reason.
+                try FileManager.default.copyItem(at: mixed.m4a, to: destination)
+            }
             audioFile = destination
         } catch {
             problems.append("Audio mixing failed: \(error.localizedDescription)")
             // The raw .caf files are the only surviving copy of the meeting; rescue them
             // before the temp capture directory is ever removed.
-            problems.append(contentsOf: rescueRawAudio(capture, stem: stem))
+            let rescue = rescueRawAudio(capture, stem: stem)
+            problems.append(contentsOf: rescue.problems)
+            captureDirectoryMayGo = rescue.complete
+            // Naming the rescued file matters as much as moving it: without an `Audio:`
+            // line the note mentions it only in prose, `audioFileName` returns nil, and
+            // `--retranscribe` refuses the one recording that already failed once.
+            audioFile = rescue.audioFile.map { outputDirectory.appendingPathComponent($0) }
         }
 
         // 2. Transcribe. Local model wins; the API is only a fallback.
@@ -113,14 +132,16 @@ enum Notes {
                 .appendingPathComponent("Desktop/\(stem).md")
             if (try? markdown.write(to: fallback, atomically: true, encoding: .utf8)) != nil {
                 problems.append("Saved to \(fallback.path) instead.")
-                try? FileManager.default.removeItem(at: capture.directory)
+                if captureDirectoryMayGo {
+                    try? FileManager.default.removeItem(at: capture.directory)
+                }
                 return (fallback, problems)
             }
             problems.append("Raw files left in \(capture.directory.path).")
             return (nil, problems)
         }
 
-        try? FileManager.default.removeItem(at: capture.directory)
+        if captureDirectoryMayGo { try? FileManager.default.removeItem(at: capture.directory) }
         Log.write("wrote \(destination.lastPathComponent)"
                     + (problems.isEmpty ? " cleanly"
                        : " with \(problems.count) problem(s): \(problems.joined(separator: "; "))"))
@@ -137,21 +158,59 @@ enum Notes {
         return "\(base)-\(n)"
     }
 
+    /// What a rescue managed to save, and whether the capture directory may now go.
+    struct Rescue {
+        let problems: [String]
+        /// The file to put on the note's `Audio:` line, so `--retranscribe` can find the
+        /// recording again. The system one when both survived: it is the side of the
+        /// conversation that is never missing.
+        let audioFile: String?
+        /// False when a source that existed could not be moved. The caller must not
+        /// delete the capture directory then, because it still holds the only copy.
+        let complete: Bool
+    }
+
     /// Called when `mix()` fails: the raw .caf files are the only remaining copy of the
     /// meeting, so move them next to where the .md will land instead of losing them when
     /// the temp capture directory is cleaned up.
-    private static func rescueRawAudio(_ capture: Recorder.Capture, stem: String) -> [String] {
+    ///
+    /// What it *could not* move is the important half of the answer. Reporting only the
+    /// successes let the caller delete the directory regardless, so a partial move
+    /// destroyed the other track in silence, and a total failure wrote "raw audio left in
+    /// captures/…" one line before deleting that exact folder.
+    /// The destination is a parameter so `--selftest` can exercise it against a scratch
+    /// tree instead of the user's real notes folder.
+    static func rescueRawAudio(_ capture: Recorder.Capture, stem: String,
+                               to destination: URL = outputDirectory) -> Rescue {
         var rescued: [String] = []
+        var stranded: [String] = []
         for (raw, suffix) in [(capture.systemAudio, "system"), (capture.microphone, "mic")] {
             guard let raw, FileManager.default.fileExists(atPath: raw.path) else { continue }
-            let dest = outputDirectory.appendingPathComponent("\(stem)-\(suffix).caf")
-            if (try? FileManager.default.moveItem(at: raw, to: dest)) != nil {
+            let dest = destination.appendingPathComponent("\(stem)-\(suffix).caf")
+            do {
+                try FileManager.default.moveItem(at: raw, to: dest)
                 rescued.append(dest.lastPathComponent)
+            } catch {
+                stranded.append(raw.lastPathComponent)
+                Log.write("rescue: could not move \(raw.lastPathComponent) — "
+                          + error.localizedDescription)
             }
         }
-        return rescued.isEmpty
-            ? ["Raw audio left in \(capture.directory.path)."]
-            : ["Raw audio preserved as \(rescued.joined(separator: ", "))."]
+
+        var problems: [String] = []
+        if !rescued.isEmpty {
+            problems.append("Raw audio preserved as \(rescued.joined(separator: ", ")).")
+        }
+        if !stranded.isEmpty {
+            problems.append("\(stranded.joined(separator: ", ")) could not be moved and "
+                            + "\(stranded.count == 1 ? "is" : "are") still in "
+                            + "\(capture.directory.path).")
+        }
+        if problems.isEmpty { problems.append("There was no raw audio left to preserve.") }
+
+        return Rescue(problems: problems,
+                      audioFile: rescued.first,
+                      complete: stranded.isEmpty)
     }
 
     // MARK: - Mixing
@@ -250,8 +309,17 @@ enum Notes {
                             "-l", transcriptionLanguage(Env.load()), "-mc", "0",
                             "-otxt", "-of", prefix.path, "-np"],
                            in: wav.deletingLastPathComponent(),
-                           label: "whisper-cli", timeout: 4 * 3600)
-        let text = try String(contentsOf: prefix.appendingPathExtension("txt"), encoding: .utf8)
+                           label: "whisper-cli", timeout: 4 * 3600,
+                           discardStandardOutput: true)
+        let output = prefix.appendingPathExtension("txt")
+        // A clean exit with no file is not a transcript. Without this the read below
+        // throws, the caller reads that as "the local model broke" and uploads the whole
+        // meeting to a paid API to find out the same thing.
+        guard FileManager.default.fileExists(atPath: output.path) else {
+            throw Failure.badResponse("whisper-cli exited cleanly but wrote no "
+                                      + output.lastPathComponent)
+        }
+        let text = try String(contentsOf: output, encoding: .utf8)
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -291,6 +359,12 @@ enum Notes {
         }
         field("model", provider.model)
         field("response_format", "json")
+        // Pinned for the same reason whisper.cpp is: auto-detection judges by the opening
+        // seconds and applies that one guess to the whole file, which is how a Portuguese
+        // meeting came back translated into English on 2026-08-06. `auto` stays available
+        // through WHISPER_LANGUAGE for anyone who wants it, with that caveat.
+        let language = transcriptionLanguage(env)
+        if language != "auto" { field("language", language) }
         body.append("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"\(payload.lastPathComponent)\"\r\nContent-Type: application/octet-stream\r\n\r\n".data(using: .utf8)!)
         body.append(try Data(contentsOf: payload))
         body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
@@ -643,7 +717,11 @@ enum Notes {
             throw Failure.badResponse("\(file.lastPathComponent) has no transcript to summarize")
         }
         let notes = try await summarize(parts.transcript)
-        let rebuilt = parts.header + "\n\n" + notes + "\n\n---\n\n## Transcript\n\n"
+        // `transcriptDivider`, never the literal: `split` and `pendingSummary` both key
+        // off that constant, so a note rebuilt with a hand-typed copy would stop being
+        // found the moment the constant changed, and the backfill would silently skip
+        // the files it had written itself.
+        let rebuilt = parts.header + "\n\n" + notes + "\n" + transcriptDivider
             + parts.transcript + "\n"
         try rebuilt.write(to: file, atomically: true, encoding: .utf8)
     }
@@ -830,8 +908,15 @@ enum Tool {
     /// Waits off the cooperative thread pool and enforces `timeout`, since a hung
     /// whisper-cli or ffmpeg would otherwise wedge the pipeline (and one of its
     /// threads) forever.
+    /// `discardStandardOutput` exists for whisper-cli, whose `-np` means "print nothing
+    /// *but* the results" — and the results are the transcript. Left alone it lands in
+    /// the diagnostic log, and a non-zero exit puts its last 400 characters into the
+    /// error message, which is echoed to `alpiste.log` and shown in an alert. Meeting
+    /// content must never reach either. Nothing is lost by dropping it: `-otxt` writes
+    /// the real output to a file, and stderr still carries the diagnostics.
     static func run(_ executable: URL, _ args: [String], in directory: URL,
-                    label: String, timeout: TimeInterval = 1800) async throws {
+                    label: String, timeout: TimeInterval = 1800,
+                    discardStandardOutput: Bool = false) async throws {
         let log = directory.appendingPathComponent("\(label).log")
         FileManager.default.createFile(atPath: log.path, contents: nil)
         guard let handle = try? FileHandle(forWritingTo: log) else {
@@ -843,7 +928,7 @@ enum Tool {
         process.executableURL = executable
         process.arguments = args
         process.currentDirectoryURL = directory
-        process.standardOutput = handle
+        process.standardOutput = discardStandardOutput ? FileHandle.nullDevice : handle
         process.standardError = handle
 
         let (stream, continuation) = AsyncStream<Void>.makeStream()
