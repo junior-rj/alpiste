@@ -67,10 +67,36 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
 - Falha em qualquer etapa ainda grava o .md e mantém o áudio. Nunca perder a gravação: mix falho
   resgata os .caf brutos para `~/MeetingNotes`, colisão de nome (mesmo minuto) ganha sufixo `-2`,
   `-3`..., e falha ao escrever o .md tenta `~/Desktop` como fallback antes de desistir
+- **Quem apaga o `captures/` é o resgate, não o pipeline.** `Notes.rescueRawAudio` devolve
+  `Rescue.complete`, e o `removeItem` do `process` depende dela. Até 0.5.7 a função montava a
+  mensagem só com o que tinha conseguido mover e não contava o resto: move parcial destruía o
+  `mic.caf` em silêncio, e move total falho fazia a nota dizer "raw audio left in captures/…" uma
+  linha antes de apagar exatamente esse diretório. O gatilho mais provável da falha no move é
+  colisão de nome, então o `uniqueStem` sonda `caf` além de `md` e `m4a`. Resgate também escreve a
+  linha `Audio:` com o `.caf`, senão o `--retranscribe` recusa justo a gravação que já falhou uma vez
+- Captura que **nunca virou nota** (crash, queda de energia, Forçar Encerramento) é varrida no
+  launch por `Recorder.orphanedCaptures` e passa pelo `Notes.process`. Antes disso o áudio ficava
+  inteiro no disco e invisível para sempre. A varredura filtra pelo prefixo `alpiste-` de propósito:
+  o `--retranscribe` guarda o scratch na mesma pasta, e varrê-lo reprocessaria nota já salva
+- Falha de escrita do `AudioTap` (disco cheio, troca de formato quando o mic vira AirPods) some no
+  meio de uma gravação que continua abrindo e tocando. Contada por fonte, logada uma vez, e devolvida
+  em `Capture.incomplete` para o .md dizer que a faixa está incompleta
 - Captura em andamento mora em `~/Library/Application Support/Alpiste/captures/`, não no temp dir
   do sistema (que o macOS pode purgar sob pressão de disco numa reunião longa)
 - Quit (Cmd-Q) durante gravação ou processamento é interceptado por `AppDelegate.applicationShouldTerminate`:
   segura o quit (`.terminateLater`), deixa o pipeline salvar, e só então libera a saída
+- **Toda saída terminal do `start()` deve responder ao AppKit**, não só o fim do pipeline. O
+  `start()` também estaciona em `.working("Starting…")`, e até 0.5.7 nenhuma das suas saídas
+  chamava `NSApp.reply`: Cmd-Q ali travava o app para sempre e o `pendingTermination` ligado
+  passava a engolir **todo** alerta pelo resto da sessão. A decisão é `QuitDecision.decide`
+  (pura, `--selftest`), e quit que chega com a gravação já de pé vira `stop()` que salva antes
+  de liberar. Diálogo de permissão (mic e tela) chama `NSApp.activate` antes, mesma pegadinha de
+  LSUIElement do calendário; e aviso de mic desligado vai **depois** do stream de pé, porque
+  modal antes segurava a gravação que o próprio texto promete
+- `SCShareableContent` e `startCapture` têm teto (`Recorder.withDeadline`), que **abandona** a
+  chamada em vez de esperar: `replayd` travado não honra cancelamento, e `TaskGroup` espera todo
+  filho antes de sair do escopo. O `catch` seguinte ainda chama `stopCapture`, que é o que impede
+  um sucesso tardio de virar sessão órfã
 - Stream do SCK que morre sozinho no meio da reunião (display desconectado, sleep/wake) é reportado
   via callback e salva o que foi capturado até ali, em vez de deixar a UI travada em "Recording".
   A causa comum é **tampa fechada no fim da reunião**: "Failed to find any displays or windows to
@@ -114,7 +140,15 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
   primeiros 30 segundos e aplica o palpite ao arquivo todo, então abertura ruidosa traduziu uma
   reunião inteira em português para o inglês. Fixar só o idioma sem o `-mc 0` apenas traduz a
   alucinação (testado: 644 de 644 linhas viraram `[multidão conversando]`). Default `pt`, override por
-  `WHISPER_LANGUAGE` no `.env` (`Notes.transcriptionLanguage`, coberta pelo `--selftest`)
+  `WHISPER_LANGUAGE` no `.env` (`Notes.transcriptionLanguage`, coberta pelo `--selftest`). O
+  mesmo idioma vai no `transcribeViaAPI`: era o único caminho que ainda auto-detectava
+- **O stdout do whisper-cli é o transcript**, e por isso é descartado (`Tool.run`,
+  `discardStandardOutput`). O `-np` significa "não imprima nada além dos resultados", e os
+  resultados são o texto: medido em 29/08 com fala sintetizada, 80 bytes de transcript no stdout,
+  nada dele no stderr, `.txt` escrito do mesmo jeito. O `Tool.run` mandava stdout para o log do
+  comando e, num exit != 0, punha as últimas 6 linhas na mensagem de erro, que vai para o
+  `alpiste.log` e para um alerta modal. Nada se perde descartando: o `-otxt` escreve a saída de
+  verdade e o stderr guarda os diagnósticos
 - A perda era **silenciosa**: o .md salvava, o resumo saía plausível, e só faltava metade da reunião.
   Por isso `Notes.runawayRepetition` (função pura, `--selftest`) marca o problema no .md quando uma
   linha se repete `Notes.repetitionLimit` vezes seguidas. O limiar de 12 foi medido, não chutado: os
@@ -197,7 +231,27 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
 - Parada: `endDate + folga`, mas reunião que estica é **prorrogada em blocos** enquanto o mic
   continua ativo, em vez de ser cortada. Sem evento casado, para com 5 min de mic ocioso; com
   evento casado o ocioso vira 15 min, generoso de propósito para que um trecho longo no mudo
-  nunca corte reunião viva. `Stop Recording` na mão sempre vence
+  nunca corte reunião viva. `Stop Recording` na mão sempre vence. A prorrogação tem **teto de 4h**
+  (`MeetingWatcher.exceededMaximum`): aba de reunião esquecida segura o mic para sempre, e captura
+  de 6h estoura o timeout de 4h do próprio whisper
+- **`offered` é identidade de sessão de microfone, não booleano** (`MeetingWatcher.alreadyOffered`,
+  pura, `--selftest`), e a contabilidade da sessão roda **acima** de todo return antecipado do tick.
+  Com um booleano abaixo do `guard !isBusy`, a reunião que começava enquanto o whisper ainda
+  processava a anterior nunca era oferecida **nem logada**: o mic não ficava ocioso, o re-arm não
+  rodava, e o flag continuava ligado da reunião anterior. Pauta de reuniões emendadas é o caso
+  comum, não o exótico. O mesmo campo evita o painel reaparecer para a call que o usuário acabou
+  de parar de gravar na mão
+- `MeetingMonitor.stop()` limpa as cinco variáveis, inclusive `startedByWatcher` e `autoStopAt`.
+  Deixando as duas para trás, desligar e religar o toggle durante uma gravação fazia o ocioso valer
+  `.infinity` no primeiro tick e cortava a reunião viva; "nunca visto ativo" agora conta como não
+  ocioso (`MeetingWatcher.idleInterval`)
+- Evento **recusado ou cancelado** não é reunião (`looksLikeMeeting`, `--selftest`). Ele continua no
+  calendário com link e convidados, e como o `meetingEvent` escolhe o de início mais recente, um
+  all-hands recusado vencia a call ad-hoc e dava a ela o título e o término errados
+- `EKEventStore` mora num actor próprio: `events(matching:)` é síncrono e o header do EventKit manda
+  não rodar na main thread. Ficava no caminho crítico de "a call começou, poe o painel e grava".
+  `startDate`/`endDate` são `null_unspecified`, então chegam implicitamente desembrulhados e um nil
+  derrubava o processo inteiro de um app sem janela: o `descriptor` devolve opcional
 - Ler o calendário exige a entitlement `com.apple.security.personal-information.calendars`.
   O hardened runtime barra acesso a dados pessoais sem ela **mesmo fora do sandbox**, igual ao
   microfone, e barra **em silêncio**: em 24/08 o `requestFullAccessToEvents` devolveu false na
