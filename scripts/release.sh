@@ -1,113 +1,26 @@
 #!/bin/bash
 #
-# release.sh — Build, sign (Developer ID), notarize and package Alpiste as a DMG.
-# Same flow as menubar-hide/scripts/release.sh. The notary profile comes from NOTARY_PROFILE
-# (a keychain profile created with `notarytool store-credentials`); override it for your team.
+# release.sh — Config do Alpiste; o fluxo de release (build fora do repo, assinatura
+# Developer ID, DMG, notarização e staple) mora no script compartilhado do workspace:
+# sparrow_workspace/scripts/release-macos.sh.
 #
 # Uso:
 #   ./scripts/release.sh
 #
 set -euo pipefail
-
 cd "$(dirname "$0")/.."
 
-NOTARY_PROFILE="${NOTARY_PROFILE:-yourlaunch-notary}"
-APP_NAME="Alpiste"
-BUILD="build"
-STAGE="$BUILD/staging"
+# O python3 do PATH pode ser um venv de outro projeto sem Pillow; sondar os
+# binários conhecidos em vez de confiar no PATH.
+FOUND=""
+for CANDIDATE in "${PYTHON:-}" /opt/homebrew/bin/python3 /usr/local/bin/python3 python3; do
+  [ -n "$CANDIDATE" ] || continue
+  if "$CANDIDATE" -c "import PIL" 2>/dev/null; then FOUND="$CANDIDATE"; break; fi
+done
+[ -n "$FOUND" ] || { echo "Nenhum python3 com Pillow encontrado: python3 -m pip install pillow" >&2; exit 1; }
 
-VERSION=$(sed -n 's/^ *MARKETING_VERSION: *"\(.*\)"/\1/p' project.yml | head -1)
-[ -n "$VERSION" ] || { echo "MARKETING_VERSION não encontrado em project.yml"; exit 1; }
-
-if [ -n "$(git status --porcelain)" ]; then
-  echo "Working tree com mudanças não commitadas. Commit antes do release."
-  git status --short
-  exit 1
-fi
-
-command -v xcodegen >/dev/null \
-  || { echo "xcodegen não encontrado: brew install xcodegen"; exit 1; }
-python3 -c "import PIL" 2>/dev/null \
-  || { echo "Pillow não encontrado: python3 -m pip install pillow"; exit 1; }
-
-# Só a staging é destruída antes de começar. Um DMG de um release anterior
-# sobrevive se este release falhar no meio do caminho.
-rm -rf "$STAGE"
-mkdir -p "$STAGE"
-
-python3 scripts/make-icon.py
-xcodegen
-
-echo "==> Arquivando (Release)"
-xcodebuild -project "$APP_NAME.xcodeproj" -scheme "$APP_NAME" -configuration Release \
-  -archivePath "$STAGE/$APP_NAME.xcarchive" archive
-
-echo "==> Exportando com Developer ID"
-xcodebuild -exportArchive \
-  -archivePath "$STAGE/$APP_NAME.xcarchive" \
-  -exportOptionsPlist scripts/ExportOptions.plist \
-  -exportPath "$STAGE/export"
-
-# O staging fica dentro do repo, que mora no Documents sincronizado pelo iCloud, e o
-# iCloud carimba o .app exportado com com.apple.FinderInfo e
-# com.apple.fileprovider.fpfs#P. Notarização e Gatekeeper aceitam, mas
-# `codesign --verify --strict` rejeita como detritus, e todo DMG até o 0.5.5 saiu
-# assim. Copiar para fora do Documents e limpar lá fecha a janela em que o iCloud
-# recarimbaria entre a limpeza e o hdiutil. O com.apple.provenance sobrevive ao
-# `xattr -c` e o codesign o ignora.
-echo "==> Limpando xattrs fora do Documents"
-DIST=$(mktemp -d /tmp/$APP_NAME-dist.XXXXXX)
-trap 'rm -rf "$DIST"' EXIT
-ditto "$STAGE/export/$APP_NAME.app" "$DIST/$APP_NAME.app"
-xattr -cr "$DIST/$APP_NAME.app"
-codesign --verify --deep --strict "$DIST/$APP_NAME.app"
-
-echo "==> Gerando DMG"
-DMG="$BUILD/$APP_NAME-$VERSION.dmg"
-rm -f "$DMG"
-hdiutil create -volname "$APP_NAME" -srcfolder "$DIST/$APP_NAME.app" -ov -format UDZO "$DMG"
-
-echo "==> Notarizando o DMG (aguarda concluir)"
-xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait
-
-echo "==> Grampeando o ticket no DMG"
-xcrun stapler staple "$DMG"
-
-echo "==> Verificação final"
-xcrun stapler validate "$DMG"
-spctl -a -t exec -vv "$DIST/$APP_NAME.app"
-# O que vai no DMG é o que tem que passar no strict, não a cópia do staging.
-MNT=$(hdiutil attach "$DMG" -nobrowse -readonly | awk -F'\t' '/\/Volumes\//{print $NF}')
-codesign --verify --deep --strict "$MNT/$APP_NAME.app"
-hdiutil detach "$MNT" -quiet
-
-# Cada .app deixado no disco vira um registro separado no LaunchServices, e aí
-# Spotlight, Launchpad e o painel de Privacidade passam a listar um "Alpiste" por
-# caminho de build. Só o DMG sobrevive ao release.
-echo "==> Limpando artefatos intermediários"
-LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
-"$LSREGISTER" -u "$STAGE/export/$APP_NAME.app" 2>/dev/null || true
-
-# O export não é o único registro que o archive cria: o xcodebuild também registra o
-# .app intermediário dentro do DerivedData, e o caminho dele muda entre releases
-# (BuildProductsPath numa vez, InstallationBuildProductsLocation noutra), então glob
-# fixo não pega. Perguntar ao próprio LaunchServices o que está registrado é o único
-# jeito estável. Preserva só o app instalado; todo o resto é artefato de build.
-# O `|| true` não é decorativo: sob `set -o pipefail`, um grep sem correspondência
-# (nenhum registro sobrando, que é o caso bom) sai com 1 e abortaria o release aqui,
-# depois do DMG já estar pronto e notarizado.
-STRAYS=$("$LSREGISTER" -dump 2>/dev/null \
-  | grep -o "/[^ ]*$APP_NAME\.app" \
-  | sort -u \
-  | grep -vE "^($HOME)?/Applications/$APP_NAME\.app\$" || true)
-
-if [ -n "$STRAYS" ]; then
-  while read -r stray; do
-    echo "    desregistrando $stray"
-    "$LSREGISTER" -u "$stray" 2>/dev/null || true
-  done <<< "$STRAYS"
-fi
-
-rm -rf "$STAGE"
-
-echo "==> Pronto: $DMG"
+export APP_NAME="Alpiste"
+export DMG_VERSIONED=1
+export PRE_BUILD_CMD="$FOUND scripts/make-icon.py"
+export CLEAN_LAUNCH_SERVICES=1
+exec ../../scripts/release-macos.sh
