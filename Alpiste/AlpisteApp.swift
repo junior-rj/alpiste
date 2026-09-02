@@ -1,5 +1,6 @@
 import AppKit
 import EventKit
+import ServiceManagement
 import SwiftUI
 
 @main
@@ -113,62 +114,7 @@ struct AlpisteApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            Text(state.statusText)
-
-            Divider()
-
-            if state.isRecording {
-                Button("Stop Recording") { state.stop() }
-                    .keyboardShortcut("r")
-            } else {
-                Button("Start Recording") { state.start() }
-                    .keyboardShortcut("r")
-                    .disabled(state.isBusy)
-            }
-
-            Toggle("Auto-start on Meetings", isOn: Binding(
-                get: { state.autoStartOnMeetings },
-                set: { state.setAutoStartOnMeetings($0) }))
-
-            // Recording still works without the calendar, so this is a note, not an alarm.
-            // The two failures need opposite actions: one this app can still resolve with a
-            // dialog, one only System Settings can.
-            if state.autoStartOnMeetings {
-                switch state.meetingCalendarStatus {
-                case .available:
-                    EmptyView()
-                case .notAsked:
-                    Button("Allow Calendar Access…") { state.requestCalendarAccess() }
-                case .blocked:
-                    Button("Calendar Access Blocked — Open Settings") {
-                        MeetingCalendar.openSystemSettings()
-                    }
-                }
-            }
-
-            if let last = state.lastNote {
-                Button("Open \(last.lastPathComponent)") { NSWorkspace.shared.open(last) }
-            }
-            Button("Open Notes Folder") {
-                try? FileManager.default.createDirectory(at: Notes.outputDirectory,
-                                                         withIntermediateDirectories: true)
-                NSWorkspace.shared.open(Notes.outputDirectory)
-            }
-            // The answer to "it showed an error and I couldn't capture it": the log is a
-            // plain text file the user can open and hand over as-is.
-            Button("Open Log") { NSWorkspace.shared.open(Log.flushed()) }
-
-            Divider()
-
-            Button("About Alpiste") {
-                // Without this the panel can open behind other apps: LSUIElement
-                // means there's no Dock icon to click to bring it forward.
-                NSApp.activate(ignoringOtherApps: true)
-                NSApp.orderFrontStandardAboutPanel(options: [:])
-            }
-
-            Button("Quit Alpiste") { NSApp.terminate(nil) }
-                .keyboardShortcut("q")
+            MenuContent(state: state)
         } label: {
             // Label shows the elapsed time next to the icon while recording.
             if state.isRecording {
@@ -177,6 +123,66 @@ struct AlpisteApp: App {
                 Image(systemName: state.isBusy ? "hourglass" : "waveform")
             }
         }
+
+        // The preferences window. `Settings` scene, never a hand-rolled NSWindow: an
+        // NSWindow with interactive SwiftUI controls recurses on constraints and crashes
+        // in a menu-bar app (workspace erros.md 2026-08-17). The toggles and config status
+        // live here now instead of in the menu.
+        Settings {
+            SettingsView(state: state)
+        }
+    }
+}
+
+/// The menu-bar dropdown. Split out of the `App` so it can reach `@Environment(\.openSettings)`,
+/// which is only available inside a `View`, not in a `Scene` builder.
+private struct MenuContent: View {
+    let state: AppState
+    @Environment(\.openSettings) private var openSettings
+
+    var body: some View {
+        Text(state.statusText)
+
+        Divider()
+
+        if state.isRecording {
+            Button("Stop Recording") { state.stop() }
+                .keyboardShortcut("r")
+        } else {
+            Button("Start Recording") { state.start() }
+                .keyboardShortcut("r")
+                .disabled(state.isBusy)
+        }
+
+        if let last = state.lastNote {
+            Button("Open \(last.lastPathComponent)") { NSWorkspace.shared.open(last) }
+        }
+        Button("Open Notes Folder") {
+            try? FileManager.default.createDirectory(at: Notes.outputDirectory,
+                                                     withIntermediateDirectories: true)
+            NSWorkspace.shared.open(Notes.outputDirectory)
+        }
+        // The answer to "it showed an error and I couldn't capture it": the log is a
+        // plain text file the user can open and hand over as-is.
+        Button("Open Log") { NSWorkspace.shared.open(Log.flushed()) }
+
+        Divider()
+
+        Button("Settings…") {
+            // LSUIElement app: with no Dock icon, the window opens behind everything
+            // unless we pull the app forward first (same reason About does it below).
+            NSApp.activate(ignoringOtherApps: true)
+            openSettings()
+        }
+        .keyboardShortcut(",")
+
+        Button("About Alpiste") {
+            NSApp.activate(ignoringOtherApps: true)
+            NSApp.orderFrontStandardAboutPanel(options: [:])
+        }
+
+        Button("Quit Alpiste") { NSApp.terminate(nil) }
+            .keyboardShortcut("q")
     }
 }
 
@@ -495,6 +501,57 @@ final class AppState {
         meetingCalendarStatus = MeetingCalendar.access
         Log.write("meeting calendar: \(MeetingCalendar.statusDescription)")
         MeetingMonitor.start()
+    }
+
+    // MARK: - Launch at login
+
+    /// Registered to start at login? The source of truth is `SMAppService`, not
+    /// `UserDefaults`: the user can flip this in System Settings > General > Login Items,
+    /// and only the service knows the live state. Mirrored into an observable property so
+    /// the Settings toggle re-renders after a change. `.requiresApproval` counts as on —
+    /// the item exists and the user meant it on, they just have to confirm it in Settings.
+    private(set) var launchAtLoginEnabled = AppState.loginItemIsOn()
+
+    private static func loginItemIsOn() -> Bool {
+        switch SMAppService.mainApp.status {
+        case .enabled, .requiresApproval: return true
+        default: return false
+        }
+    }
+
+    /// Re-reads the live status. Called when the Settings window appears, so a change made
+    /// in System Settings shows up without relaunching.
+    func refreshLaunchAtLoginStatus() {
+        let current = Self.loginItemIsOn()
+        guard current != launchAtLoginEnabled else { return }
+        launchAtLoginEnabled = current
+    }
+
+    func setLaunchAtLogin(_ enabled: Bool) {
+        do {
+            if enabled {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+            launchAtLoginEnabled = Self.loginItemIsOn()
+            Log.write("launch at login \(enabled ? "enabled" : "disabled")")
+
+            // A first registration can land in `.requiresApproval`: the login item is
+            // there but macOS wants the user to confirm it before it runs.
+            if enabled, SMAppService.mainApp.status == .requiresApproval {
+                Log.write("launch at login needs approval in System Settings")
+                alert("Approve Alpiste in Login Items",
+                      "Alpiste was added to your login items, but macOS needs you to approve it.\n\n"
+                        + "Open System Settings > General > Login Items and turn Alpiste on.")
+                SMAppService.openSystemSettingsLoginItems()
+            }
+        } catch {
+            // Snap the toggle back to whatever the service actually reports.
+            launchAtLoginEnabled = Self.loginItemIsOn()
+            Log.write("launch at login \(enabled ? "register" : "unregister") failed — \(error.localizedDescription)")
+            alert("Could not change Launch at Login", error.localizedDescription)
+        }
     }
 
     // MARK: - Helpers
