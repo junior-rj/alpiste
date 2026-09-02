@@ -108,36 +108,80 @@ private struct PromptView: View {
     let decline: @MainActor () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top, spacing: 11) {
+                // The waveform sits in a warm tile that echoes the app icon, so the panel
+                // reads as Alpiste at a glance rather than as a generic system prompt.
                 Image(systemName: "waveform")
+                    .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(.tint)
-                Text("Meeting detected")
-                    .font(.headline)
+                    .frame(width: 34, height: 34)
+                    .background(.tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 9,
+                                                                          style: .continuous))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Meeting detected")
+                        .font(.headline)
+                    // The calendar title when there is one, so it is obvious *which* call
+                    // this is about before agreeing to record it.
+                    Text(subtitle ?? "A call is using your microphone.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
 
-            // The calendar title when there is one, so it is obvious *which* call this is
-            // about before agreeing to record it.
-            Text(subtitle ?? "A call is using your microphone.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
+            // Makes the 90s auto-dismiss visible instead of a surprise. Timing out counts
+            // as "Not now", so the bar depleting to nothing reads as exactly that.
+            TimeoutBar(duration: MeetingPrompt.timeout)
 
-            HStack {
+            HStack(spacing: 8) {
                 Spacer()
                 Button("Not now", action: decline)
-                // `.defaultAction` is here for the prominent styling it gives Record, not
-                // for the Return key: a non-activating panel shown with
-                // `orderFrontRegardless` never becomes key, so no keyboard shortcut in
-                // this view can ever fire. Making it key would take the keyboard away
-                // from the call, which is the whole thing this panel avoids.
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                // `.borderedProminent` gives Record the accent fill; `.defaultAction` is
+                // kept only for the styling ring, not the Return key: a non-activating
+                // panel shown with `orderFrontRegardless` never becomes key, so no
+                // keyboard shortcut here can ever fire. Making it key would take the
+                // keyboard away from the call, which is the whole thing this panel avoids.
                 Button("Record", action: accept)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
                     .keyboardShortcut(.defaultAction)
             }
         }
         .padding(16)
         .frame(width: 320, alignment: .leading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+}
+
+/// A slim track that empties over the panel's lifetime. State, not decoration: it shows
+/// how long is left before the prompt dismisses itself. Honours Reduce Motion by falling
+/// back to a static caption rather than an animating bar.
+private struct TimeoutBar: View {
+    let duration: TimeInterval
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var depleted = false
+
+    var body: some View {
+        if reduceMotion {
+            Text("Dismisses on its own")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        } else {
+            ZStack(alignment: .leading) {
+                Capsule().fill(.quaternary)
+                Capsule()
+                    .fill(.tint.opacity(0.55))
+                    .scaleEffect(x: depleted ? 0 : 1, anchor: .leading)
+            }
+            .frame(height: 3)
+            .onAppear {
+                withAnimation(.linear(duration: duration)) { depleted = true }
+            }
+        }
     }
 }

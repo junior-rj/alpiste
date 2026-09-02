@@ -12,8 +12,8 @@ settings:
   base:
     SWIFT_VERSION: "6.0"
     SWIFT_STRICT_CONCURRENCY: complete
-    MARKETING_VERSION: "0.5.8"
-    CURRENT_PROJECT_VERSION: "15"
+    MARKETING_VERSION: "0.5.9"
+    CURRENT_PROJECT_VERSION: "16"
     DEVELOPMENT_TEAM: "Q9KN4S5XHY"
 
 targets:
@@ -40,3 +40,5 @@ targets:
         INFOPLIST_KEY_NSMicrophoneUsageDescription: "Alpiste records your microphone alongside the meeting audio so the transcript includes your side of the conversation."
         # Regenerate the asset with: python3 scripts/make-icon.py
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # Brand accent (Riviera Blue), tints controls and the meeting panel.
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
