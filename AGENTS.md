@@ -57,7 +57,13 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
   de nada: o app da barra de menu continua na versão velha e o que foi testado não é o que roda.
   Encerrar o Alpiste em execução antes (conferindo que não há gravação em andamento em
   `~/Library/Application Support/Alpiste/captures/`), substituir o .app e relançar. A permissão
-  de TCC sobrevive porque a identidade Developer ID é a mesma. Depois: tag `vX.Y.Z` anotada,
+  de TCC sobrevive porque a identidade Developer ID é a mesma.
+  **Instalar a partir do DMG montado, nunca do `build/export/Alpiste-stapled.app`**: aquele
+  caminho mora dentro do Documents e o iCloud recarimba `com.apple.FinderInfo` nele, então
+  reprova no `codesign --verify --strict` (medido em 02/09) enquanto o app dentro do DMG passa.
+  O DMG é grampeado como imagem, e o app dentro dele não leva ticket próprio: depois do
+  `ditto` rodar `xcrun stapler staple /Applications/Alpiste.app`, senão a instalação regride
+  para verificação online no primeiro launch. Depois: tag `vX.Y.Z` anotada,
   `git push origin main --follow-tags` e `gh release create vX.Y.Z build/Alpiste-X.Y.Z.dmg`
   com notas em inglês (abertura, bullets, fechamento "Signed with Developer ID and notarized
   by Apple. Requires macOS 15+."). Tag sem release no GitHub não serve para quem instala
