@@ -216,6 +216,11 @@ final class AppState {
     /// one. Cleared with every stop so a later manual recording cannot inherit it.
     private var meetingTitle: String?
 
+    /// Held from the moment a start is attempted until the note has been written. A
+    /// sleeping display takes the SCK stream down with it and truncates the meeting; see
+    /// `SleepGuard` for the measurement that established that.
+    private let sleepGuard = SleepGuard()
+
     private var session: Recorder.Session?
     private var startedAt: Date?
     private var ticker: Timer?
@@ -250,6 +255,10 @@ final class AppState {
         phase = .working("Starting…")
 
         Task {
+            // Before the permission checks and before `Recorder.start`, whose own ceiling is
+            // 45 s: none of that can be left racing an idle display.
+            sleepGuard.hold("recording a meeting")
+
             guard Recorder.hasScreenPermission() else {
                 Recorder.requestScreenPermission()
                 phase = .idle
@@ -257,6 +266,7 @@ final class AppState {
                       "Alpiste needs Screen Recording to capture the meeting's audio.\n\n"
                         + "Enable it in System Settings > Privacy & Security > Screen Recording, "
                         + "then quit and reopen Alpiste. macOS only applies this permission on relaunch.")
+                sleepGuard.release()
                 finishTerminationIfPending()
                 return
             }
@@ -310,6 +320,7 @@ final class AppState {
                 Log.write("recording could not start — \(error.localizedDescription)")
                 phase = .failed(error.localizedDescription)
                 alert("Could not start recording", error.localizedDescription)
+                sleepGuard.release()
                 finishTerminationIfPending()
             }
         }
@@ -343,6 +354,7 @@ final class AppState {
     func stop() {
         guard let session, let startedAt else {
             // Nothing to save. A quit waiting on this would otherwise wait forever.
+            sleepGuard.release()
             finishTerminationIfPending()
             return
         }
@@ -394,6 +406,9 @@ final class AppState {
                 alert("Could not save notes", message + "\n\nDetails in \(Log.file.path)")
             }
 
+            // Only now, not back at the stop: whisper runs for minutes and a display that
+            // slept the moment the recording ended would suspend the pipeline mid-note.
+            sleepGuard.release()
             finishTerminationIfPending()
         }
     }
@@ -1052,6 +1067,23 @@ enum SelfTest {
                "operand: another flag is not a path")
         expect(AlpisteApp.operand(after: "--regenerate", in: ["Alpiste", "--regenerate"]) == nil,
                "operand: nil when the flag ends the line")
+
+        // A sleeping display kills the SCK stream mid-meeting, so the hold has to survive
+        // every path a recording can take out of `start()` and `stop()`. The two cases that
+        // matter are the repeated ones: a second hold that leaks the first token would keep
+        // the machine awake for the rest of the session with nothing left pointing at it,
+        // and a release from a path that never held must not trap, since every terminal exit
+        // calls it whether or not it owns the hold.
+        let sleepGuard = SleepGuard()
+        expect(!sleepGuard.isHeld, "SleepGuard: holds nothing until asked")
+        sleepGuard.hold("selftest")
+        expect(sleepGuard.isHeld, "SleepGuard: holds the assertion")
+        sleepGuard.hold("selftest")
+        expect(sleepGuard.isHeld, "SleepGuard: a second hold is a no-op, not a leaked token")
+        sleepGuard.release()
+        expect(!sleepGuard.isHeld, "SleepGuard: releases the assertion")
+        sleepGuard.release()
+        expect(!sleepGuard.isHeld, "SleepGuard: releasing what was never held is safe")
 
         // A capture daemon that never answers must not park the app in "Starting…"
         // forever, so the ceiling abandons the call rather than waiting it out.

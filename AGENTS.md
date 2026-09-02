@@ -31,6 +31,7 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
 - Alpiste/MeetingPrompt.swift — o painel flutuante Record / Not now
 - Alpiste/SettingsView.swift — a janela de preferências (scene `Settings`): toggles de Launch at
   login e Auto-start on Meetings, mais status read-only de transcrição
+- Alpiste/SleepGuard.swift — segura o assertion de energia enquanto grava e processa
 - Alpiste/Log.swift — registro persistente em `~/Library/Logs/Alpiste/alpiste.log`
 - Alpiste/AlpisteApp.swift — MenuBarExtra (`MenuContent`), scene `Settings`, máquina de estados,
   permissões, launch-at-login (`SMAppService`), `SelfTest`
@@ -104,6 +105,17 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
   chamada em vez de esperar: `replayd` travado não honra cancelamento, e `TaskGroup` espera todo
   filho antes de sair do escopo. O `catch` seguinte ainda chama `stopCapture`, que é o que impede
   um sucesso tardio de virar sessão órfã
+- **O app segura `idleDisplaySleepDisabled` enquanto grava E enquanto processa** (`SleepGuard`,
+  `ProcessInfo.beginActivity`, coberto pelo `--selftest`). Não é conforto: o filtro do SCK é um
+  **display**, e display que dorme por inatividade derruba o stream com "Failed to find any
+  displays or windows to capture". Em 02/09 isso cortou duas reuniões pela metade, ao segundo
+  exato do `Display is turned off` do `pmset -g log`, e a nota saiu curta e plausível sem dizer
+  que faltava metade. Piorava o diagnóstico porque o modal que a queda levantava culpava a tampa,
+  que nunca tinha sido fechada. A janela cobre o pipeline de propósito: o whisper roda por minutos
+  e a tela apagando logo depois do stop o suspenderia. Tampa fechada continua **não** sendo
+  impedida (nada impede), e é justamente o caso que o `streamFailed` salva. O `hold` é idempotente
+  porque um segundo token vazaria o primeiro, e o `release` é devido por **toda** saída terminal de
+  `start()` e `stop()`, mesma disciplina do `finishTerminationIfPending`
 - Stream do SCK que morre sozinho no meio da reunião (display desconectado, sleep/wake) é reportado
   via callback e salva o que foi capturado até ali, em vez de deixar a UI travada em "Recording".
   A causa comum é **tampa fechada no fim da reunião**: "Failed to find any displays or windows to
