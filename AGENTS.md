@@ -29,8 +29,12 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
   casamento com o calendário, leitura do CoreAudio, e o `MeetingMonitor` que faz o polling
 - Alpiste/MeetingCalendar.swift — EventKit, só leitura, título e horário de término
 - Alpiste/MeetingPrompt.swift — o painel flutuante Record / Not now
+- Alpiste/SettingsView.swift — a janela de preferências (scene `Settings`): toggles de Launch at
+  login e Auto-start on Meetings, mais status read-only de transcrição
+- Alpiste/SleepGuard.swift — segura o assertion de energia enquanto grava e processa
 - Alpiste/Log.swift — registro persistente em `~/Library/Logs/Alpiste/alpiste.log`
-- Alpiste/AlpisteApp.swift — MenuBarExtra, máquina de estados, permissões, `SelfTest`
+- Alpiste/AlpisteApp.swift — MenuBarExtra (`MenuContent`), scene `Settings`, máquina de estados,
+  permissões, launch-at-login (`SMAppService`), `SelfTest`
 - scripts/setup.sh — brew deps + download do ggml-medium.bin + ~/.alpiste/.env
 - scripts/make-icon.py — gera o AppIcon (grãos-onda) com Pillow, sem dependência externa
 - scripts/release.sh — DMG assinado (Developer ID) e notarizado; desde 31/08/2026 é um wrapper
@@ -101,6 +105,17 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
   chamada em vez de esperar: `replayd` travado não honra cancelamento, e `TaskGroup` espera todo
   filho antes de sair do escopo. O `catch` seguinte ainda chama `stopCapture`, que é o que impede
   um sucesso tardio de virar sessão órfã
+- **O app segura `idleDisplaySleepDisabled` enquanto grava E enquanto processa** (`SleepGuard`,
+  `ProcessInfo.beginActivity`, coberto pelo `--selftest`). Não é conforto: o filtro do SCK é um
+  **display**, e display que dorme por inatividade derruba o stream com "Failed to find any
+  displays or windows to capture". Em 02/09 isso cortou duas reuniões pela metade, ao segundo
+  exato do `Display is turned off` do `pmset -g log`, e a nota saiu curta e plausível sem dizer
+  que faltava metade. Piorava o diagnóstico porque o modal que a queda levantava culpava a tampa,
+  que nunca tinha sido fechada. A janela cobre o pipeline de propósito: o whisper roda por minutos
+  e a tela apagando logo depois do stop o suspenderia. Tampa fechada continua **não** sendo
+  impedida (nada impede), e é justamente o caso que o `streamFailed` salva. O `hold` é idempotente
+  porque um segundo token vazaria o primeiro, e o `release` é devido por **toda** saída terminal de
+  `start()` e `stop()`, mesma disciplina do `finishTerminationIfPending`
 - Stream do SCK que morre sozinho no meio da reunião (display desconectado, sleep/wake) é reportado
   via callback e salva o que foi capturado até ali, em vez de deixar a UI travada em "Recording".
   A causa comum é **tampa fechada no fim da reunião**: "Failed to find any displays or windows to
@@ -214,6 +229,18 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
 - Check único: `Alpiste.app/Contents/MacOS/Alpiste --selftest` (assíncrono; roda ffmpeg de verdade no mixer)
 - "About Alpiste" no menu chama o painel nativo do macOS (`NSApp.orderFrontStandardAboutPanel`), que lê
   nome/versão/copyright direto do Info.plist. Sem tela custom
+- **Preferências são a scene `Settings {}`** (`SettingsView`), aberta pelo item "Settings…" (⌘,) via
+  `@Environment(\.openSettings)` num `MenuContent` extraído (o `\.openSettings` só existe dentro de
+  uma `View`, não no builder de `Scene`). Como `LSUIElement`, chamar `NSApp.activate` antes de
+  `openSettings()`, senão a janela abre atrás. **Nunca `NSWindow` própria com controle interativo:
+  crasha por recursão de constraints em app de barra de menu** (erros.md 2026-08-17). Os toggles e a
+  afordância de calendário moram aqui, não mais no menu
+- **Launch at login** é `SMAppService.mainApp` (macOS 13+; sem entitlement em app Developer ID sem
+  sandbox). A fonte de verdade é o `status` do serviço, não `UserDefaults` (o usuário pode mudar em
+  Ajustes do Sistema): `AppState.launchAtLoginEnabled` espelha `.enabled || .requiresApproval` e é
+  relido no `.task` da janela. `register()` que cai em `.requiresApproval` abre os Ajustes e avisa;
+  erro reverte o toggle e alerta pelo `AppState.alert`. Só se valida de verdade com o app em
+  `/Applications` (o login item guarda o caminho real do bundle — erros.md 2026-08-17 sobre teste)
 - **Auto-start de reunião**: o gatilho é **áudio, não calendário**. O CoreAudio expõe, desde o
   macOS 14.4, quais processos seguram o microfone (`kAudioHardwarePropertyProcessObjectList`,
   `kAudioProcessPropertyIsRunningInput`, `kAudioProcessPropertyBundleID`), sem permissão
