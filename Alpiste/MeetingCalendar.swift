@@ -109,11 +109,18 @@ enum MeetingCalendar {
     static func currentMeeting(at now: Date) async -> MeetingWatcher.CalendarEvent? {
         guard isAuthorized else { return nil }
         // A window wide enough to catch a long call already underway, narrow enough that the
-        // predicate stays cheap to run every time a prompt is raised.
-        let events = await store.meetings(from: now.addingTimeInterval(-6 * 3600),
-                                          to: now.addingTimeInterval(3600))
+        // predicate stays cheap to run every time a prompt is raised. Under a ceiling: the
+        // lookup sits on the critical path of showing the panel, and a hung account must
+        // cost the title, not the recording.
+        let store = self.store
+        let events = (try? await Recorder.withDeadline(lookupTimeout, "calendar lookup") {
+            await store.meetings(from: now.addingTimeInterval(-6 * 3600),
+                                 to: now.addingTimeInterval(3600))
+        }) ?? []
         return MeetingWatcher.meetingEvent(events, at: now)
     }
+
+    private static let lookupTimeout: TimeInterval = 3
 
     /// Owns the `EKEventStore` off the main actor.
     ///

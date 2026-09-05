@@ -23,37 +23,55 @@ import Foundation
 /// Lock rather than `@MainActor` (the only caller is `AppState`, which is main-actor bound):
 /// `--selftest` runs its checks from a detached task, and a main-actor guard could not be
 /// exercised there without an actor hop around every assertion.
+///
+/// The hold has an owner. `hold` hands back a token and `release` ignores any other: the
+/// pipeline of one recording, waking up after its modal "Saved with warnings" alert, used
+/// to release the assertion the next recording had just taken, since the watcher keeps
+/// ticking inside a modal and can start a new recording while the alert is up.
 final class SleepGuard: @unchecked Sendable {
+    /// Identifies one hold. Stale tokens are ignored by `release`.
+    typealias Token = UInt64
+
     private let lock = NSLock()
-    private var token: (any NSObjectProtocol)?
+    private var activity: (any NSObjectProtocol)?
+    private var owner: Token = 0
+    private var generation: Token = 0
 
     var isHeld: Bool {
         lock.lock()
         defer { lock.unlock() }
-        return token != nil
+        return activity != nil
     }
 
-    /// Idempotent on purpose. A second `beginActivity` would leak the first token, and the
-    /// recording that released once would go on holding the machine awake for the rest of
-    /// the session with nothing left pointing at it.
-    func hold(_ reason: String) {
+    /// Takes (or takes over) the hold and returns the token that releases it. One
+    /// `beginActivity` at a time: a second would leak the first, and the recording that
+    /// released once would go on holding the machine awake with nothing pointing at it.
+    @discardableResult
+    func hold(_ reason: String) -> Token {
         lock.lock()
-        guard token == nil else { return lock.unlock() }
-        token = ProcessInfo.processInfo.beginActivity(
-            options: [.idleDisplaySleepDisabled, .idleSystemSleepDisabled],
-            reason: reason)
+        generation += 1
+        owner = generation
+        let fresh = activity == nil
+        if fresh {
+            activity = ProcessInfo.processInfo.beginActivity(
+                options: [.idleDisplaySleepDisabled, .idleSystemSleepDisabled],
+                reason: reason)
+        }
+        let token = owner
         lock.unlock()
-        Log.write("sleep guard held — \(reason)")
+        Log.write(fresh ? "sleep guard held — \(reason)" : "sleep guard taken over — \(reason)")
+        return token
     }
 
-    /// Safe to call having never held anything. Every terminal exit of `start()` and `stop()`
-    /// owes this call, the same debt `finishTerminationIfPending()` collects, and making the
-    /// redundant calls harmless is what keeps that discipline cheap enough to actually follow.
-    func release() {
+    /// Releases only if `token` is the current owner's. Safe with a stale token or one
+    /// already released: every terminal exit of `start()` and `stop()` owes this call, the
+    /// same debt `finishTerminationIfPending()` collects, and making the redundant calls
+    /// harmless is what keeps that discipline cheap enough to actually follow.
+    func release(_ token: Token) {
         lock.lock()
-        guard let held = token else { return lock.unlock() }
+        guard token == owner, let held = activity else { return lock.unlock() }
         ProcessInfo.processInfo.endActivity(held)
-        token = nil
+        activity = nil
         lock.unlock()
         Log.write("sleep guard released")
     }

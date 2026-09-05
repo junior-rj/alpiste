@@ -220,14 +220,14 @@ final class AppState {
     /// sleeping display takes the SCK stream down with it and truncates the meeting; see
     /// `SleepGuard` for the measurement that established that.
     private let sleepGuard = SleepGuard()
+    /// The token of the recording underway. `stop()` copies it before its pipeline task
+    /// starts, so a recording that begins while that pipeline is still finishing cannot
+    /// have its hold released by the older task.
+    private var sleepToken: SleepGuard.Token = 0
 
     private var session: Recorder.Session?
     private var startedAt: Date?
     private var ticker: Timer?
-    /// A stream that died in the window between `Recorder.start` returning and the phase
-    /// becoming `.recording`, where `streamFailed` has no session to stop yet. Held here
-    /// so `start()` can act on it instead of the UI showing a timer against a dead stream.
-    private var pendingStreamError: (any Error)?
 
     var isRecording: Bool { if case .recording = phase { true } else { false } }
     var isBusy: Bool { if case .working = phase { true } else { false } }
@@ -257,7 +257,8 @@ final class AppState {
         Task {
             // Before the permission checks and before `Recorder.start`, whose own ceiling is
             // 45 s: none of that can be left racing an idle display.
-            sleepGuard.hold("recording a meeting")
+            let token = sleepGuard.hold("recording a meeting")
+            sleepToken = token
 
             guard Recorder.hasScreenPermission() else {
                 Recorder.requestScreenPermission()
@@ -266,7 +267,7 @@ final class AppState {
                       "Alpiste needs Screen Recording to capture the meeting's audio.\n\n"
                         + "Enable it in System Settings > Privacy & Security > Screen Recording, "
                         + "then quit and reopen Alpiste. macOS only applies this permission on relaunch.")
-                sleepGuard.release()
+                sleepGuard.release(token)
                 finishTerminationIfPending()
                 return
             }
@@ -302,13 +303,6 @@ final class AppState {
                           "Alpiste is recording the meeting's audio but not your voice.\n\n"
                             + "Enable the microphone in System Settings > Privacy & Security > Microphone.")
                 }
-                // The stream died while we were still setting up: act on it now that there
-                // is a session to tear down, rather than leaving a ticking timer against it.
-                if let died = pendingStreamError {
-                    pendingStreamError = nil
-                    streamFailed(died)
-                    return
-                }
                 // Cmd-Q landed inside the "Starting…" window. There is a recording now, so
                 // honour the quit the way `applicationShouldTerminate` would have: stop and
                 // let the pipeline save, and `stop()` answers AppKit when it is done.
@@ -320,7 +314,7 @@ final class AppState {
                 Log.write("recording could not start — \(error.localizedDescription)")
                 phase = .failed(error.localizedDescription)
                 alert("Could not start recording", error.localizedDescription)
-                sleepGuard.release()
+                sleepGuard.release(token)
                 finishTerminationIfPending()
             }
         }
@@ -335,14 +329,10 @@ final class AppState {
     /// with the capture unprocessed until the lid opened and OK was clicked (47 min the
     /// first time), and a shutdown in between would have left it stranded in captures/.
     private func streamFailed(_ error: Error) {
-        guard session != nil else { return }  // a user-initiated stop already tore this down
-        guard isRecording else {
-            // Between `Recorder.start` returning and the phase becoming `.recording`:
-            // `stop()` would find nothing to stop and the death would vanish, leaving the
-            // menu counting time against a stream that is already gone.
-            pendingStreamError = error
-            return
-        }
+        // A user-initiated stop already tore this down. There is no window between the
+        // session being assigned and the phase becoming `.recording`: `start()` does both
+        // without suspending, so a session with no recording cannot be observed here.
+        guard session != nil, isRecording else { return }
         Log.write("capture stream stopped on its own — \(error.localizedDescription)")
         stop()
         alert("Recording interrupted",
@@ -353,13 +343,14 @@ final class AppState {
 
     func stop() {
         guard let session, let startedAt else {
-            // Nothing to save. A quit waiting on this would otherwise wait forever.
-            sleepGuard.release()
+            // Nothing to save. A quit waiting on this would otherwise wait forever. The
+            // hold stays if a start is in flight: that one owns it and will settle it.
+            if !isBusy { sleepGuard.release(sleepToken) }
             finishTerminationIfPending()
             return
         }
         self.session = nil
-        pendingStreamError = nil
+        let token = sleepToken
         let title = meetingTitle
         meetingTitle = nil
         stopTicking()
@@ -383,8 +374,7 @@ final class AppState {
 
                 // A summary that failed now can succeed in a few minutes, so retry on a
                 // schedule instead of leaving the note for the user to notice and repair.
-                let contents = try? String(contentsOf: file, encoding: .utf8)
-                let summaryPending = contents.map(Notes.pendingSummary) ?? false
+                let summaryPending = result.summaryPending
                 if summaryPending { Backfill.scheduleRetries() }
 
                 // Only the problems a retry cannot fix are worth interrupting for. On
@@ -408,7 +398,7 @@ final class AppState {
 
             // Only now, not back at the stop: whisper runs for minutes and a display that
             // slept the moment the recording ended would suspend the pipeline mid-note.
-            sleepGuard.release()
+            sleepGuard.release(token)
             finishTerminationIfPending()
         }
     }
@@ -576,7 +566,7 @@ final class AppState {
         let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                let seconds = Int(Date().timeIntervalSince(start))
+                let seconds = max(0, Int(Date().timeIntervalSince(start)))
                 self.elapsed = String(format: "%d:%02d", seconds / 60, seconds % 60)
             }
         }
@@ -634,11 +624,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ///
     /// Safe to run here and only here. Everything in `captures/` at launch predates this
     /// session, so no recording in progress can be swept up by it.
+    private static let recoveryGuard = SleepGuard()
+
     private static func recoverOrphanedCaptures() {
         let orphans = Recorder.orphanedCaptures()
         guard !orphans.isEmpty else { return }
         Log.write("recovery: \(orphans.count) capture(s) left behind by an earlier run")
         Task {
+            // Whisper runs for minutes per capture, and a laptop that idles to sleep in
+            // the middle would leave the orphan half-processed for the next launch.
+            let token = recoveryGuard.hold("recovering captures")
+            defer { recoveryGuard.release(token) }
             for orphan in orphans {
                 let result = await Notes.process(orphan.capture, startedAt: orphan.startedAt)
                 if let file = result.file {
@@ -1076,14 +1072,14 @@ enum SelfTest {
         // calls it whether or not it owns the hold.
         let sleepGuard = SleepGuard()
         expect(!sleepGuard.isHeld, "SleepGuard: holds nothing until asked")
-        sleepGuard.hold("selftest")
+        let token = sleepGuard.hold("selftest")
         expect(sleepGuard.isHeld, "SleepGuard: holds the assertion")
-        sleepGuard.hold("selftest")
-        expect(sleepGuard.isHeld, "SleepGuard: a second hold is a no-op, not a leaked token")
-        sleepGuard.release()
+        _ = sleepGuard.hold("selftest")
+        expect(sleepGuard.isHeld, "SleepGuard: a second hold does not leak the first token")
+        sleepGuard.release(sleepGuard.hold("selftest"))
         expect(!sleepGuard.isHeld, "SleepGuard: releases the assertion")
-        sleepGuard.release()
-        expect(!sleepGuard.isHeld, "SleepGuard: releasing what was never held is safe")
+        sleepGuard.release(token)
+        expect(!sleepGuard.isHeld, "SleepGuard: releasing what is no longer held is safe")
 
         // A capture daemon that never answers must not park the app in "Starting…"
         // forever, so the ceiling abandons the call rather than waiting it out.
@@ -1234,6 +1230,104 @@ enum SelfTest {
         expect(FileManager.default.fileExists(atPath: scratch.path),
                "orphanedCaptures: leaves the --retranscribe scratch space alone")
         try? FileManager.default.removeItem(at: captures)
+
+        // The names a recording claims in ~/MeetingNotes. The rescue writes
+        // `<stem>-system.caf`, not `<stem>.caf`, and until 0.5.10 the collision probe
+        // looked for the latter, so a second recording in the same minute as a rescued
+        // one collided exactly where the probe was meant to protect it.
+        expect(Notes.artifactNames(for: "x") == ["x.md", "x.m4a", "x-system.caf", "x-mic.caf"],
+               "artifactNames: probes the names the rescue actually writes")
+
+        // The `Audio:` line is read back by --retranscribe and joined to the note's
+        // folder; a name with a path in it would point ffmpeg outside ~/MeetingNotes.
+        expect(Notes.isSafeAudioName("2026-07-31-2214.m4a"), "isSafeAudioName: a plain file name")
+        expect(!Notes.isSafeAudioName("../other.m4a"), "isSafeAudioName: rejects ..")
+        expect(!Notes.isSafeAudioName("sub/x.m4a"), "isSafeAudioName: rejects a path")
+        expect(!Notes.isSafeAudioName("/etc/passwd"), "isSafeAudioName: rejects an absolute path")
+        expect(!Notes.isSafeAudioName(""), "isSafeAudioName: rejects empty")
+        expect(!Notes.isSafeAudioName(".."), "isSafeAudioName: rejects the parent directory")
+
+        // A calendar title comes from whoever sent the invite. A newline in it would
+        // inject lines above the real `Audio:` line, and audioFileName takes the first.
+        expect(Notes.safeTitle("Weekly\nAudio: `../x.m4a`") == "Weekly Audio: '../x.m4a'",
+               "safeTitle: flattens newlines and neutralises backticks")
+        expect(Notes.safeTitle("  spaced   out  ") == "spaced out",
+               "safeTitle: collapses whitespace")
+        expect(Notes.safeTitle(String(repeating: "a", count: 500)).count == 200,
+               "safeTitle: caps the length")
+        expect(Notes.safeTitle("\n\n") == "Meeting", "safeTitle: never empty")
+        let injectedTitle = Notes.markdown(title: Notes.safeTitle("t\nAudio: `../evil.m4a`"),
+                                           notes: nil, transcript: "x",
+                                           audioFile: "real.m4a", problems: [])
+        expect(Notes.audioFileName(inNote: injectedTitle) == "real.m4a",
+               "safeTitle: a forged Audio line in the title cannot outrank the real one")
+
+        // The summary is untrusted text steered by whatever was said in the meeting.
+        // If it carries the note's own markers, split() and pendingSummary misread the
+        // file: the backfill then re-summarizes it on every pass for a week.
+        let forgedDivider = "## Summary\n- a" + Notes.transcriptDivider + "fake transcript"
+        let forgedNote = Notes.markdown(title: "t", notes: Notes.sanitizeNotes(forgedDivider),
+                                        transcript: "real transcript", audioFile: "a.m4a",
+                                        problems: [])
+        expect(Notes.split(markdown: forgedNote)?.transcript == "real transcript",
+               "sanitizeNotes: a divider inside the summary does not split the note")
+        let forgedPlaceholder = "## Summary\n" + Notes.noNotesPlaceholder + "\n- b"
+        let placeholderNote = Notes.markdown(title: "t", notes: Notes.sanitizeNotes(forgedPlaceholder),
+                                             transcript: "real", audioFile: "a.m4a", problems: [])
+        expect(!Notes.pendingSummary(markdown: placeholderNote),
+               "sanitizeNotes: the placeholder inside a summary does not read as pending")
+        let forgedAudio = "Audio: `../evil.m4a`\n## Summary\n- c"
+        let audioNote = Notes.markdown(title: "t", notes: Notes.sanitizeNotes(forgedAudio),
+                                       transcript: "real", audioFile: "a.m4a", problems: [])
+        expect(Notes.audioFileName(inNote: audioNote) == "a.m4a",
+               "sanitizeNotes: a forged Audio line in the summary is not the note's audio")
+        expect(Notes.sanitizeNotes("## Summary\n- fine") == "## Summary\n- fine",
+               "sanitizeNotes: leaves an ordinary summary untouched")
+
+        // Regeneration used to keep only the title and audio lines, so a backfill that
+        // filled in the summary erased "part of the microphone track was lost" and the
+        // note read as complete again. The summary failure itself is the one problem
+        // regeneration fixes, so that one goes.
+        let lossy = Notes.markdown(title: "t", notes: nil, transcript: "raw text",
+                                   audioFile: "a.m4a",
+                                   problems: ["Part of the microphone track was lost",
+                                              Notes.summaryFailurePrefix + "Groq: 503"])
+        if let parts = Notes.split(markdown: lossy) {
+            expect(parts.problems == ["Part of the microphone track was lost"],
+                   "split: keeps the problems a new summary cannot fix, drops the one it can")
+            let rebuilt = Notes.compose(header: parts.header, problems: parts.problems,
+                                        notes: "## Summary\n- p", transcript: parts.transcript)
+            expect(rebuilt.contains("microphone track was lost"),
+                   "regenerate: the rebuilt note still says what was lost")
+            expect(!rebuilt.contains("Groq: 503"),
+                   "regenerate: the rebuilt note drops the summary failure it just fixed")
+            expect(Notes.split(markdown: rebuilt)?.transcript == "raw text"
+                    && !Notes.pendingSummary(markdown: rebuilt),
+                   "regenerate: the rebuilt note still parses and is no longer pending")
+        } else {
+            expect(false, "split: parses a note with problems")
+        }
+        expect(Notes.split(markdown: healthy)?.problems.isEmpty == true,
+               "split: a clean note has no problems to carry")
+
+        // A key pasted from an editor that writes CRLF used to fail with a 401 and no
+        // hint, because the value ended in a carriage return.
+        expect(Env.parse("GROQ_API_KEY=abc\r\nGEMINI_API_KEY=def\r\n")["GROQ_API_KEY"] == "abc",
+               "env: strips a carriage return from CRLF files")
+
+        // A hold has an owner. Without that, the pipeline of the previous recording,
+        // waking up after its modal alert, released the assertion the next recording
+        // had just taken, and the display could sleep on a live capture.
+        let owned = SleepGuard()
+        let first = owned.hold("first")
+        let second = owned.hold("second")
+        expect(first != second, "SleepGuard: a second hold takes ownership with a new token")
+        owned.release(first)
+        expect(owned.isHeld, "SleepGuard: a stale token does not release the current hold")
+        owned.release(second)
+        expect(!owned.isHeld, "SleepGuard: the owner's token releases it")
+        owned.release(second)
+        expect(!owned.isHeld, "SleepGuard: releasing twice is safe")
 
         expect(Tool.find("ffmpeg") != nil, "tools: ffmpeg found without a login PATH")
 

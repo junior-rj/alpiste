@@ -334,9 +334,11 @@ enum MeetingMonitor {
         // meeting invisible. It started while whisper was still working, the microphone
         // therefore never went idle, the re-arm below the returns never ran, and the call
         // was neither offered nor logged.
-        if idleFor >= callEndGrace, micActiveSince != nil {
+        if idleFor >= callEndGrace {
             // A panel still up is now offering to record a call that has already ended,
-            // and clicking Record would capture the silence after it.
+            // and clicking Record would capture the silence after it. Checked on its own,
+            // not only while a session is open: the panel can appear after the session
+            // was already closed, since `offer` awaits the calendar before showing it.
             if MeetingPrompt.isShowing {
                 Log.write("meeting watcher: the call ended before the prompt was answered")
                 MeetingPrompt.dismiss()
@@ -377,9 +379,17 @@ enum MeetingMonitor {
     private static func offer(now: Date) {
         // Claimed synchronously, before the calendar lookup is awaited, so the tick two
         // seconds later cannot decide to offer the same session all over again.
-        offeredSession = micActiveSince
+        let claimed = micActiveSince
+        offeredSession = claimed
         Task {
             let event = await MeetingCalendar.currentMeeting(at: now)
+            // The calendar lookup can take a second on a cold account, and the call can
+            // end in that second. Offering it then would record silence under the
+            // ended meeting's title, with no tick able to take the panel down.
+            guard micActiveSince == claimed else {
+                Log.write("meeting watcher: the call ended during the calendar lookup, not prompting")
+                return
+            }
             // The title is meeting content and never reaches the log; whether one was
             // matched is a decision, and that does.
             Log.write("meeting watcher: prompting (calendar event "

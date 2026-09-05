@@ -47,18 +47,31 @@ enum Log {
         queue.async {
             guard let data = line.data(using: .utf8) else { return }
             rotateIfNeeded()
-            try? FileManager.default.createDirectory(at: directory,
-                                                     withIntermediateDirectories: true)
-            guard FileManager.default.fileExists(atPath: file.path) else {
-                _ = try? data.write(to: file)
-                return
+            do {
+                try FileManager.default.createDirectory(at: directory,
+                                                        withIntermediateDirectories: true,
+                                                        attributes: [.posixPermissions: 0o700])
+                guard FileManager.default.fileExists(atPath: file.path) else {
+                    try data.write(to: file)
+                    return
+                }
+                let handle = try FileHandle(forWritingTo: file)
+                defer { try? handle.close() }
+                try handle.seekToEnd()
+                try handle.write(contentsOf: data)
+            } catch {
+                // The only diagnostic channel just failed. Once, to stderr, so a launch
+                // from a terminal still shows why the log went quiet.
+                guard !writeFailureReported else { return }
+                writeFailureReported = true
+                FileHandle.standardError.write(
+                    Data("alpiste: cannot write \(file.path): \(error.localizedDescription)\n".utf8))
             }
-            guard let handle = try? FileHandle(forWritingTo: file) else { return }
-            defer { try? handle.close() }
-            _ = try? handle.seekToEnd()
-            try? handle.write(contentsOf: data)
         }
     }
+
+    /// Only touched on `queue`.
+    nonisolated(unsafe) private static var writeFailureReported = false
 
     /// Blocks until every queued line has been written. Required before `exit()`: the
     /// `--regenerate` and `--backfill` paths would otherwise lose the very line that
@@ -74,7 +87,8 @@ enum Log {
         flush()
         if !FileManager.default.fileExists(atPath: file.path) {
             try? FileManager.default.createDirectory(at: directory,
-                                                     withIntermediateDirectories: true)
+                                                     withIntermediateDirectories: true,
+                                                     attributes: [.posixPermissions: 0o700])
             FileManager.default.createFile(atPath: file.path, contents: nil)
         }
         return file
