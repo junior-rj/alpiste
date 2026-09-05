@@ -227,9 +227,45 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
 - O marcador de "falta resumo" é o placeholder `_No notes were generated…`, procurado só acima do
   divisor do transcript (`Notes.pendingSummary`). Se mudar o texto do placeholder, a varredura para
   de achar os arquivos: por isso ele é uma constante única compartilhada com o `markdown()`
-- Regenerar reconstrói o arquivo a partir do `split()`, que preserva só título, linha de áudio e
-  transcript. Avisos não relacionados ao LLM (ex: "áudio bruto preservado como X") somem na
-  regeneração; foi decisão consciente para não complicar o `split()`
+- Regenerar reconstrói o arquivo pelo `Notes.compose` a partir do `split()`, que preserva
+  título, linha de áudio, transcript e os problemas do blockquote que uma nova sumarização
+  **não** resolve (`Notes.keptProblems`: tudo menos o `summaryFailurePrefix`). Até 0.5.10
+  os avisos sumiam na regeneração, e um backfill que preenchia o resumo apagava "part of the
+  microphone track was lost", devolvendo uma nota que parecia inteira
+- A saída do LLM passa por `Notes.sanitizeNotes` (pura, `--selftest`) antes de entrar na nota:
+  o resumo é texto não confiável guiado pelo que foi dito na reunião, e `split`,
+  `pendingSummary` e `audioFileName` casam marcadores literais. Divisor forjado devolvia
+  transcript errado; placeholder forjado deixava a nota pendente para sempre (backfill
+  regenerando por 7 dias e gastando cota); linha `Audio:` forjada apontava o `--retranscribe`
+  para outro arquivo. Título de calendário passa por `Notes.safeTitle` pelo mesmo motivo
+  (vem de qualquer convite recebido, e `\n` injetava linhas antes da `Audio:` real)
+- O `--retranscribe` exige que a linha `Audio:` seja um **nome**, não um caminho
+  (`Notes.isSafeAudioName`): `appendingPathComponent` segue `..` para fora de
+  `~/MeetingNotes`, e o resultado da transcrição iria para o LLM
+- O `SleepGuard` tem dono: `hold` devolve um token e `release(token)` ignora token que não
+  seja o do dono atual. Sem isso o pipeline da gravação anterior, acordando depois do alerta
+  modal "Saved with warnings", soltava o assertion que a gravação seguinte tinha acabado de
+  pegar (o watcher continua tickando dentro do modal e pode iniciar gravação nova)
+- `Backfill.sweep` honra cancelamento no sleep de 65 s: `try?` engolia o `CancellationError`
+  que `scheduleRetries` dispara a cada nova gravação sem resumo, e o laço passava a mandar
+  todas as notas de uma vez, a rajada de 8000 TPM que o sleep foi medido para evitar
+- `Notes.artifactNames` é a lista de nomes que o `uniqueStem` sonda: o resgate grava
+  `<stem>-system.caf` e `<stem>-mic.caf`, nunca `<stem>.caf`, e a sonda errada deixava a
+  segunda gravação do minuto colidir com a resgatada
+
+## Riscos aceitos (auditoria de 2026-09-05)
+- `/opt/homebrew/bin` é gravável pelo grupo admin e o app executa o que estiver lá com as
+  permissões de TCC dele. Inerente ao shell-out para o brew; validar assinatura do ffmpeg
+  quebraria instalação normal
+- O corpo do erro HTTP (400 chars) vai para log, alerta e nota. Os provedores não ecoam o
+  prompt nesses corpos, e o 413 do Groq é justamente o diagnóstico documentado acima
+- `kill(pid, SIGKILL)` depois de `isRunning` tem janela teórica de reuso de PID; Foundation
+  não expõe alternativa e ffmpeg/whisper honram o SIGTERM anterior
+- `--regenerate` e `--retranscribe` aceitam qualquer caminho de `.md`: é CLI do próprio usuário
+- Troca de formato do mic no meio da gravação (AirPods) continua contada e reportada como
+  faixa incompleta, não recuperada
+- `~/MeetingNotes` fica com o umask do usuário (é pasta dele); `captures/` e `Logs/Alpiste`
+  são criados em 700
 - `Tool.run` é assíncrono e tem timeout (default 30 min, whisper usa 4h): nunca bloqueia o
   cooperative pool do Swift Concurrency, e um processo pendurado não trava o pipeline pra sempre
 - Check único: `Alpiste.app/Contents/MacOS/Alpiste --selftest` (assíncrono; roda ffmpeg de verdade no mixer)

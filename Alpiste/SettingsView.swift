@@ -6,6 +6,9 @@ import SwiftUI
 /// a quick way to see whether the keys and model are in place without opening the .env.
 struct SettingsView: View {
     let state: AppState
+    /// Loaded when the window appears, not on every body evaluation: the computed
+    /// version read and parsed the file once per label, on the main thread.
+    @State private var env: [String: String] = [:]
 
     var body: some View {
         Form {
@@ -53,11 +56,11 @@ struct SettingsView: View {
         .fixedSize(horizontal: false, vertical: true)
         // Reflect a change made outside the app (System Settings > Login Items) without a
         // relaunch, each time the window is shown.
-        .task { state.refreshLaunchAtLoginStatus() }
+        .task {
+            state.refreshLaunchAtLoginStatus()
+            env = Env.load()
+        }
     }
-
-    // Read fresh each time the pane is shown; the .env is tiny and settings open rarely.
-    private var env: [String: String] { Env.load() }
 
     private var language: String { Notes.transcriptionLanguage(env) }
 

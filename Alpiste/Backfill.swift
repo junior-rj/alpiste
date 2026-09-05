@@ -78,7 +78,14 @@ enum Backfill {
             // to Gemini and spends one of its twenty daily requests on a meeting Groq
             // would have taken. Waiting out the window is the whole reason
             // `groqTranscriptLimit` was measured in the first place.
-            if index > 0 { try? await Task.sleep(for: .seconds(65)) }
+            // Cancellation has to be honoured here, not swallowed: `scheduleRetries`
+            // cancels the previous schedule on every new failed recording, and a
+            // swallowed cancellation made every remaining sleep return at once, which is
+            // precisely the burst the sleep exists to avoid.
+            if index > 0 {
+                do { try await Task.sleep(for: .seconds(65)) } catch { return result }
+            }
+            if Task.isCancelled { return result }
             do {
                 try await Notes.regenerate(file: file)
                 Log.write("backfill: filled in \(file.lastPathComponent)")

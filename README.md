@@ -36,9 +36,9 @@ multi-hour meeting survives disk pressure.
 
 ## Auto-start on meetings
 
-Off by default. Turn on **Auto-start on Meetings** in the menu and Alpiste offers to record
-when it notices you have joined a call: a small floating panel with **Record** and **Not
-now**, which times out after 90 seconds and never steals focus.
+Off by default. Turn on **Auto-start on meetings** in Settings (⌘, from the menu bar icon)
+and Alpiste offers to record when it notices you have joined a call: a small floating panel
+with **Record** and **Not now**, which times out after 90 seconds and never steals focus.
 
 The trigger is audio, not the calendar. CoreAudio reports which processes hold the
 microphone, so an event you never joined stays quiet and an unscheduled call is still
@@ -54,17 +54,27 @@ shows up as `com.google.Chrome.helper`.
 The calendar is context, not trigger. If Calendar.app has an event running when the panel
 appears, its title becomes the note's heading and its end time schedules the stop. Without
 one, the recording stops five minutes after the last meeting app lets go of the
-microphone. A meeting that runs past its scheduled end is extended in ten-minute blocks
-rather than being cut off, and **Stop Recording** always wins.
+microphone; with one, the idle allowance grows to fifteen minutes so a long stretch on mute
+never cuts a live meeting. A meeting that runs past its scheduled end is extended in
+ten-minute blocks rather than being cut off, up to a four-hour ceiling for a meeting tab
+nobody closed, and **Stop Recording** always wins.
 
 Calendar access is requested the first time you switch the feature on, never at launch.
 Going without it costs you the title and the scheduled stop; everything else still works.
 
-macOS shows that dialog exactly once, so the menu distinguishes the two ways of being
+macOS shows that dialog exactly once, so Settings distinguishes the two ways of being
 without it. **Allow Calendar Access…** appears while the dialog has never been answered and
 raises it again. **Calendar Access Blocked — Open Settings** appears once it has been
 refused, because at that point only System Settings can grant it. Granting it there is
 picked up within a couple of seconds; no relaunch needed.
+
+## Settings
+
+⌘, from the menu bar icon, or **Settings…** in the menu. Two toggles, **Launch at login**
+(a standard login item, which macOS may ask you to approve) and **Auto-start on
+meetings**, plus a read-only view of the transcription setup: the pinned language, whether
+each API key is set, and whether the local model is installed. Keys and language are edited
+in `~/.alpiste/.env`, never in the app.
 
 ## Install
 
@@ -129,9 +139,19 @@ GROQ_API_KEY=...
 # MEETING_STOP_GRACE_MINUTES=   # defaults to 5
 # MEETING_OVERRUN_MINUTES=      # defaults to 10
 
-# Optional transcription fallback. Only used when the local model is missing.
+# Language whisper is pinned to, defaults to pt. Deliberately not "auto": whisper decides
+# from the first 30 seconds alone and applies that guess to the whole file.
+# WHISPER_LANGUAGE=pt
+
+# Optional transcription fallback. Only used when the local model is missing or crashes.
+# Groq is tried first when its key is set; OpenAI otherwise.
 # OPENAI_API_KEY=
+# GROQ_WHISPER_MODEL=       # defaults to whisper-large-v3-turbo
+# OPENAI_WHISPER_MODEL=     # defaults to whisper-1
 ```
+
+`setup.sh` creates the file owner-only and verifies the model download against the
+checksum whisper.cpp publishes before installing it.
 
 Groq's `on_demand` tier caps at 8,000 tokens per minute and refuses an oversized request
 with **HTTP 413**, not 429, which reads like a payload limit without being one. That cap,
@@ -164,9 +184,26 @@ transient errors before giving up.
 Alpiste --regenerate ~/MeetingNotes/2026-07-31-2214.md
 ```
 
-Re-runs summarization on an already-written note file, in place, keeping its transcript.
+Re-runs summarization on an already-written note file, in place, keeping its transcript
+and any warning about the recording itself (a lost microphone track, a rescued raw file).
 
-You rarely need it: a recording that ends without notes schedules its own retries, and the
+```sh
+Alpiste --retranscribe ~/MeetingNotes/2026-07-31-2214.md
+```
+
+Throws the saved transcript away, transcribes the `.m4a` next to the note again, and then
+re-summarizes. This is the recovery `--regenerate` cannot give: a transcript the decoder
+looped on stays looped, and the note says so when it detects it. The audio must still be
+beside the note, and its `Audio:` line has to name a file in that same folder.
+
+```sh
+Alpiste --backfill
+```
+
+Runs, from a terminal, the same sweep the app performs on its own over every recent note
+still missing its summary.
+
+You rarely need any of them: a recording that ends without notes schedules its own retries, and the
 alert is deferred until those passes are spent, so a summary that recovers on its own never
 interrupts you. Reach for `--regenerate` when the retries gave up, or when no notes key was
 set at recording time.
@@ -214,9 +251,14 @@ Regenerates the icon, archives, signs with Developer ID, packages a DMG, notariz
 Apple, and staples the ticket. Requires a clean working tree, `xcodegen`, and Pillow (for
 the icon). Output lands in `build/Alpiste-<version>.dmg`, where `<version>` comes from
 `MARKETING_VERSION` in `project.yml`. Adjust the signing identity (`DEVELOPMENT_TEAM` in
-`project.yml`, `teamID` in `scripts/ExportOptions.plist`) and the notary profile
-(`NOTARY_PROFILE=...`, a keychain profile from `notarytool store-credentials`) to your own
-team.
+`project.yml`) and the notary profile (`NOTARY_PROFILE=...`, a keychain profile from
+`notarytool store-credentials`) to your own team.
+
+`scripts/release.sh` is a thin configuration wrapper: the flow itself lives in a shared
+script outside this repository (`../../scripts/release-macos.sh` in the author's
+workspace), so a fresh clone cannot run it as-is. The steps are the standard ones:
+`xcodebuild archive`, export with a Developer ID `ExportOptions.plist` generated from your
+team ID, `hdiutil` into a DMG, `notarytool submit --wait`, `stapler staple`.
 
 ## The icon
 
@@ -243,8 +285,8 @@ hairlines once macOS scales the icon to 32px.
 
 ## Not included
 
-Speaker diarization, a notes browser, live transcription, and any settings UI.
-Configuration is the `.env` file and the model directory.
+Speaker diarization, a notes browser, and live transcription. API keys and the language
+are configured in the `.env` file, not in the app.
 
 ## Credits
 

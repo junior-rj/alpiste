@@ -23,7 +23,7 @@ enum Notes {
                         startedAt: Date,
                         title: String? = nil,
                         progress: @Sendable (String) -> Void = { _ in })
-        async -> (file: URL?, problems: [String]) {
+        async -> (file: URL?, problems: [String], summaryPending: Bool) {
         var problems: [String] = []
 
         // A source that lost buffers still leaves a file that opens and plays, so nothing
@@ -38,18 +38,19 @@ enum Notes {
             try FileManager.default.createDirectory(at: outputDirectory,
                                                     withIntermediateDirectories: true)
         } catch {
-            return (nil, ["Could not create \(outputDirectory.path): \(error.localizedDescription)"])
+            return (nil, ["Could not create \(outputDirectory.path): \(error.localizedDescription). "
+                          + "Raw files left in \(capture.directory.path)."], false)
         }
 
         // A collision only happens if two recordings start in the same minute; suffix
         // rather than overwrite, since overwriting would silently destroy the earlier one.
         let stem = Self.uniqueStem(Self.stamp(startedAt)) { candidate in
-            // .caf counts: a rescued raw file from an earlier failure sits in this folder
-            // under the same stem, and colliding with it is the likeliest way for the
-            // rescue's own move to fail.
-            ["md", "m4a", "caf"].contains { ext in
+            // The rescued .caf files count: one from an earlier failure sits in this
+            // folder under the same stem, and colliding with it is the likeliest way for
+            // the rescue's own move to fail.
+            artifactNames(for: candidate).contains { name in
                 FileManager.default.fileExists(
-                    atPath: outputDirectory.appendingPathComponent("\(candidate).\(ext)").path)
+                    atPath: outputDirectory.appendingPathComponent(name).path)
             }
         }
 
@@ -117,15 +118,16 @@ enum Notes {
         // 4. Always write the file.
         let captured = [capture.systemAudio != nil ? "system audio" : nil,
                         capture.microphone != nil ? "microphone" : nil].compactMap { $0 }
-        let markdown = Self.markdown(title: title ?? Self.title(startedAt),
+        let markdown = Self.markdown(title: title.map(Self.safeTitle) ?? Self.title(startedAt),
                                      notes: notes,
                                      transcript: transcript,
                                      audioFile: audioFile?.lastPathComponent,
                                      sources: captured.isEmpty ? nil : captured.joined(separator: " + "),
                                      problems: problems)
         let destination = outputDirectory.appendingPathComponent("\(stem).md")
+        let summaryPending = notes == nil && !transcript.isEmpty
         do {
-            try markdown.write(to: destination, atomically: true, encoding: .utf8)
+            try Self.writeNew(markdown, to: destination)
         } catch {
             problems.append("Could not write \(destination.path): \(error.localizedDescription)")
             // The Desktop, deliberately, and deliberately not swept afterwards: the
@@ -135,26 +137,58 @@ enum Notes {
             // `--regenerate <path>` still works on it by hand.
             let fallback = FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent("Desktop/\(stem).md")
-            if (try? markdown.write(to: fallback, atomically: true, encoding: .utf8)) != nil {
+            if (try? Self.writeNew(markdown, to: fallback)) != nil {
                 problems.append("Saved to \(fallback.path) instead.")
                 if captureDirectoryMayGo {
                     try? FileManager.default.removeItem(at: capture.directory)
                 }
-                return (fallback, problems)
+                return (fallback, problems, summaryPending)
             }
             problems.append("Raw files left in \(capture.directory.path).")
-            return (nil, problems)
+            return (nil, problems, false)
         }
 
         if captureDirectoryMayGo { try? FileManager.default.removeItem(at: capture.directory) }
         Log.write("wrote \(destination.lastPathComponent)"
                     + (problems.isEmpty ? " cleanly"
                        : " with \(problems.count) problem(s): \(problems.joined(separator: "; "))"))
-        return (destination, problems)
+        return (destination, problems, summaryPending)
     }
 
-    /// Pure: appends -2, -3… until neither `<stem>.md` nor `<stem>.m4a` (per `exists`)
-    /// is taken. Two recordings started in the same minute must not collide.
+    /// Never overwrites. `uniqueStem` picked a free name a few minutes ago, before
+    /// whisper ran; anything that landed on it since (a `--backfill` in a terminal, a
+    /// second copy of the app) would be destroyed by a plain atomic write.
+    private static func writeNew(_ markdown: String, to destination: URL) throws {
+        try Data(markdown.utf8).write(to: destination, options: [.atomic, .withoutOverwriting])
+    }
+
+    /// Pure: every file a recording may claim under `stem` in the notes folder. The
+    /// rescue writes `-system.caf` and `-mic.caf`, never `<stem>.caf`, and probing the
+    /// wrong name let a second recording in the same minute collide with a rescued one.
+    /// Covered by `--selftest`.
+    static func artifactNames(for stem: String) -> [String] {
+        ["\(stem).md", "\(stem).m4a", "\(stem)-system.caf", "\(stem)-mic.caf"]
+    }
+
+    /// Pure: a calendar title made safe for the `# ` line. Titles come from whoever
+    /// sent the invite; a newline would inject lines above the real `Audio:` line, and
+    /// `audioFileName` takes the first one it finds. Covered by `--selftest`.
+    static func safeTitle(_ title: String) -> String {
+        let flat = title.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+            .replacingOccurrences(of: "`", with: "'")
+        guard !flat.isEmpty else { return "Meeting" }
+        return String(flat.prefix(200))
+    }
+
+    /// Pure: whether an `Audio:` line names a file, not a path. `--retranscribe` joins
+    /// it to the note's folder, and `appendingPathComponent` would happily follow `..`
+    /// out of ~/MeetingNotes. Covered by `--selftest`.
+    static func isSafeAudioName(_ name: String) -> Bool {
+        !name.isEmpty && name != "." && name != ".." && !name.contains("/")
+    }
+
+    /// Pure: appends -2, -3… until no name in `artifactNames` (per `exists`) is taken.
+    /// Two recordings started in the same minute must not collide.
     /// Covered by `--selftest`.
     static func uniqueStem(_ base: String, exists: (String) -> Bool) -> String {
         guard exists(base) else { return base }
@@ -263,6 +297,14 @@ enum Notes {
         args += ["-map", wavSource, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav.path]
 
         try await Tool.run(ffmpeg, args, in: capture.directory, label: "ffmpeg")
+        // A clean exit with an empty file is not a mix, and the note would advertise
+        // audio that is not there.
+        for output in [m4a, wav] {
+            let size = (try? output.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            guard size > 0 else {
+                throw Failure.badResponse("ffmpeg exited cleanly but \(output.lastPathComponent) is empty")
+            }
+        }
         return Mixed(m4a: m4a, wav16k: wav)
     }
 
@@ -360,7 +402,7 @@ enum Notes {
         let boundary = "alpiste-\(UUID().uuidString)"
         var body = Data()
         func field(_ name: String, _ value: String) {
-            body.append("--\(boundary)\r\nContent-Disposition: form-data; name=\"\(name)\"\r\n\r\n\(value)\r\n".data(using: .utf8)!)
+            body.append(Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"\(name)\"\r\n\r\n\(value)\r\n".utf8))
         }
         field("model", provider.model)
         field("response_format", "json")
@@ -370,7 +412,7 @@ enum Notes {
         // through WHISPER_LANGUAGE for anyone who wants it, with that caveat.
         let language = transcriptionLanguage(env)
         if language != "auto" { field("language", language) }
-        body.append("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"\(payload.lastPathComponent)\"\r\nContent-Type: application/octet-stream\r\n\r\n".data(using: .utf8)!)
+        body.append(Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"\(payload.lastPathComponent)\"\r\nContent-Type: application/octet-stream\r\n\r\n".utf8))
 
         // Staged on disk rather than assembled in memory. An hour of 16 kHz wav is about
         // 115 MB; as one `Data` the multipart body holds a second copy of it, and
@@ -388,7 +430,7 @@ enum Notes {
         try sink.write(contentsOf: body)
         // Mapped, so the kernel pages the audio through instead of resident memory.
         try sink.write(contentsOf: try Data(contentsOf: payload, options: .mappedIfSafe))
-        try sink.write(contentsOf: "\r\n--\(boundary)--\r\n".data(using: .utf8)!)
+        try sink.write(contentsOf: Data("\r\n--\(boundary)--\r\n".utf8))
         try sink.close()
 
         guard let endpoint = URL(string: provider.url) else {
@@ -657,7 +699,7 @@ enum Notes {
         }
         guard longest >= repetitionLimit else { return nil }
         return "Transcription looped: one line repeats \(longest) times in a row, so speech "
-            + "after that point is probably missing. Re-run it with `Alpiste --retranscribe`."
+            + "after that point is probably missing. Re-run it with `Alpiste --retranscribe <file.md>`."
     }
 
     /// Separates the notes from the transcript. `split` and `pendingSummary` both key
@@ -699,6 +741,25 @@ enum Notes {
         return nil
     }
 
+    /// Pure: a summary made safe to sit above the divider. The summary is untrusted
+    /// text steered by whatever was said in the meeting, and `split`, `pendingSummary`
+    /// and `audioFileName` all key off literal markers: a summary carrying the divider
+    /// hands `split` the wrong transcript, one carrying the placeholder keeps the note
+    /// pending so the backfill re-summarizes it on every pass for a week, and one
+    /// carrying an `Audio:` line points `--retranscribe` at the wrong file.
+    /// Covered by `--selftest`.
+    static func sanitizeNotes(_ notes: String) -> String {
+        notes
+            .replacingOccurrences(of: noNotesPlaceholder, with: "")
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { line -> String in
+                if line.hasPrefix("---") { return "\\" + line }
+                if line.hasPrefix("Audio: ") { return " " + line }
+                return String(line)
+            }
+            .joined(separator: "\n")
+    }
+
     /// Pure: assembles the final file. Covered by `--selftest`.
     static func markdown(title: String,
                          notes: String?,
@@ -712,24 +773,49 @@ enum Notes {
             // mic actually made it in; a silent participant looks identical to a dead mic.
             out += "Audio: `\(audioFile)`" + (sources.map { " — \($0)" } ?? "") + "\n\n"
         }
+        out += compose(problems: problems, notes: notes, transcript: transcript)
+        return out
+    }
+
+    /// Pure: everything below the header. Shared by the initial write and by the two
+    /// rewrites, so a regenerated note has exactly the shape of a fresh one and keeps
+    /// being recognised by `split` and `pendingSummary`. Covered by `--selftest`.
+    static func compose(header: String? = nil, problems: [String], notes: String?,
+                        transcript: String) -> String {
+        var out = header.map { $0 + "\n\n" } ?? ""
         out += problemsBlock(problems)
-        out += (notes ?? noNotesPlaceholder) + "\n"
+        out += (notes.map(sanitizeNotes) ?? noNotesPlaceholder) + "\n"
         out += transcriptDivider
         out += transcript.isEmpty ? "_No transcript was produced._\n" : transcript + "\n"
         return out
     }
 
+    /// Pure: the problems recorded above the divider, minus the summary failure. That
+    /// one is what a rewrite fixes; the rest ("part of the microphone track was lost",
+    /// "raw audio preserved as…") describe the recording itself and must survive, or a
+    /// backfill that fills in the summary turns a note missing half its audio back into
+    /// one that reads as complete. Covered by `--selftest`.
+    static func keptProblems(_ markdown: String) -> [String] {
+        let above = markdown.range(of: transcriptDivider)
+            .map { String(markdown[..<$0.lowerBound]) } ?? markdown
+        return above.split(separator: "\n")
+            .filter { $0.hasPrefix("> - ") }
+            .map { String($0.dropFirst(4)) }
+            .filter { !$0.hasPrefix(summaryFailurePrefix) }
+    }
+
     /// Pure: pulls the reusable parts back out of a written note file so the summary
-    /// can be regenerated. Returns the title and audio lines verbatim plus the
-    /// transcript; the problems blockquote and the no-notes placeholder are exactly
-    /// what regeneration replaces, so they are dropped. Covered by `--selftest`.
-    static func split(markdown: String) -> (header: String, transcript: String)? {
+    /// can be regenerated. Returns the title and audio lines verbatim, the problems
+    /// worth keeping, and the transcript; the no-notes placeholder is exactly what
+    /// regeneration replaces, so it is dropped. Covered by `--selftest`.
+    static func split(markdown: String) -> (header: String, transcript: String,
+                                            problems: [String])? {
         guard let range = markdown.range(of: transcriptDivider) else { return nil }
         let transcript = String(markdown[range.upperBound...])
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !transcript.isEmpty, transcript != "_No transcript was produced._" else { return nil }
         guard let header = noteHeader(markdown) else { return nil }
-        return (header, transcript)
+        return (header, transcript, keptProblems(markdown))
     }
 
     /// Pure: true when a saved note still has a transcript worth summarizing but no
@@ -752,12 +838,12 @@ enum Notes {
             throw Failure.badResponse("\(file.lastPathComponent) has no transcript to summarize")
         }
         let notes = try await summarize(parts.transcript)
-        // `transcriptDivider`, never the literal: `split` and `pendingSummary` both key
-        // off that constant, so a note rebuilt with a hand-typed copy would stop being
-        // found the moment the constant changed, and the backfill would silently skip
-        // the files it had written itself.
-        let rebuilt = parts.header + "\n\n" + notes + "\n" + transcriptDivider
-            + parts.transcript + "\n"
+        // `compose`, never a hand-typed copy of the layout: `split` and `pendingSummary`
+        // key off its constants, so a note rebuilt any other way would stop being found
+        // the moment they changed, and the backfill would silently skip the files it had
+        // written itself.
+        let rebuilt = compose(header: parts.header, problems: parts.problems,
+                              notes: notes, transcript: parts.transcript)
         try rebuilt.write(to: file, atomically: true, encoding: .utf8)
     }
 
@@ -775,7 +861,14 @@ enum Notes {
         guard let name = audioFileName(inNote: contents) else {
             throw Failure.badResponse("\(file.lastPathComponent) does not name an audio file")
         }
-        let audio = file.deletingLastPathComponent().appendingPathComponent(name)
+        // A name, never a path: the line is read back from a file anyone could have
+        // edited, and following `..` out of the notes folder would transcribe, and send
+        // to the LLM, whatever it pointed at.
+        let folder = file.standardizedFileURL.deletingLastPathComponent()
+        let audio = folder.appendingPathComponent(name).standardizedFileURL
+        guard isSafeAudioName(name), audio.deletingLastPathComponent() == folder else {
+            throw Failure.badResponse("\(file.lastPathComponent) names an audio file outside its folder")
+        }
         guard FileManager.default.fileExists(atPath: audio.path) else {
             throw Failure.badResponse("\(name) is no longer next to \(file.lastPathComponent)")
         }
@@ -809,8 +902,8 @@ enum Notes {
             problems.append(summaryFailurePrefix + error.localizedDescription)
         }
 
-        let rebuilt = header + "\n\n" + problemsBlock(problems)
-            + (notes ?? noNotesPlaceholder) + "\n" + transcriptDivider + transcript + "\n"
+        let rebuilt = compose(header: header, problems: problems, notes: notes,
+                              transcript: transcript)
         try rebuilt.write(to: file, atomically: true, encoding: .utf8)
         return problems
     }
@@ -842,29 +935,38 @@ enum Notes {
 
     private static let transientStatuses: Set<Int> = [429, 500, 502, 503, 504]
 
+    /// Ephemeral and uncached: the request body is the meeting, and the shared session
+    /// carries a process-wide cache, cookie jar and credential store it has no use for.
+    private static let session: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.urlCache = nil
+        configuration.httpCookieStorage = nil
+        return URLSession(configuration: configuration)
+    }()
+
     /// Free-tier Gemini and Groq throw transient 429/5xx under load, so spaced retries
     /// (2s/4s/8s) usually ride the spike out. A `Retry-After` header, when present,
     /// overrides the backoff. Non-transient errors propagate at once. `uploading`
     /// makes this double as the transcription upload's retry path, since a dropped
     /// 429 there loses the whole transcript, not just the summary.
-    private static func fetchWithRetry(_ request: URLRequest, uploading body: Data? = nil,
+    private static func fetchWithRetry(_ request: URLRequest,
                                        uploadingFile file: URL? = nil,
                                        attempts: Int = 4) async throws -> Data {
         func send() async throws -> (Data, URLResponse) {
             if let file {
-                try await URLSession.shared.upload(for: request, fromFile: file)
-            } else if let body {
-                try await URLSession.shared.upload(for: request, from: body)
+                try await session.upload(for: request, fromFile: file)
             } else {
-                try await URLSession.shared.data(for: request)
+                try await session.data(for: request)
             }
         }
 
         let host = request.url?.host() ?? "?"
-        for attempt in 1..<attempts {
+        for attempt in 1...attempts {
+            let last = attempt == attempts
             do {
                 let (data, response) = try await send()
-                if let http = response as? HTTPURLResponse, transientStatuses.contains(http.statusCode) {
+                if !last, let http = response as? HTTPURLResponse,
+                   transientStatuses.contains(http.statusCode) {
                     let retryAfter = http.value(forHTTPHeaderField: "Retry-After").flatMap(Double.init)
                     let backoff = min(retryAfter ?? Double(1 << attempt), 60)
                     Log.write("\(host): HTTP \(http.statusCode) on attempt \(attempt)/\(attempts), "
@@ -874,15 +976,14 @@ enum Notes {
                 }
                 try checkHTTP(response, data)
                 return data
-            } catch where isTransient(error) {
+            } catch where !last && isTransient(error) {
                 Log.write("\(host): \(error.localizedDescription) on attempt \(attempt)/\(attempts), "
                             + "retrying in \(1 << attempt)s")
                 try await Task.sleep(for: .seconds(1 << attempt))
             }
         }
-        let (data, response) = try await send()
-        try checkHTTP(response, data)
-        return data
+        // Unreachable: the last attempt either returns or throws above.
+        throw Failure.badResponse("\(host): no attempts left")
     }
 
     private static func isTransient(_ error: Error) -> Bool {
@@ -966,6 +1067,14 @@ enum Tool {
         process.executableURL = executable
         process.arguments = args
         process.currentDirectoryURL = directory
+        // A minimal environment, not the app's: launched from a terminal with an API
+        // key exported, the whole environment would otherwise be handed to ffmpeg and
+        // whisper, which have no business seeing it.
+        process.environment = [
+            "PATH": searchPaths.joined(separator: ":"),
+            "HOME": FileManager.default.homeDirectoryForCurrentUser.path,
+            "LANG": "en_US.UTF-8",
+        ]
         process.standardOutput = discardStandardOutput ? FileHandle.nullDevice : handle
         process.standardError = handle
 
@@ -976,7 +1085,12 @@ enum Tool {
             continuation.yield(())
             continuation.finish()
         }
-        try process.run()
+        do {
+            try process.run()
+        } catch {
+            continuation.finish()
+            throw error
+        }
 
         // Three outcomes, not two. A cancelled enclosing task also ends the stream, and
         // reading `terminationStatus` off a process that is still running is an
@@ -1030,7 +1144,13 @@ enum Env {
     static let file = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".alpiste/.env")
 
+    /// Said once per session: the file holds API keys, and a mode that lets the group
+    /// or the world read it is worth one line in the log. The value is never logged.
+    private static let permissionsChecked = NSLock()
+    nonisolated(unsafe) private static var permissionsWarned = false
+
     static func load() -> [String: String] {
+        warnIfReadable()
         var values = parse((try? String(contentsOf: file, encoding: .utf8)) ?? "")
         for key in ["GEMINI_API_KEY", "GEMINI_MODEL", "GROQ_API_KEY", "GROQ_MODEL",
                     "GROQ_WHISPER_MODEL", "OPENAI_API_KEY", "OPENAI_WHISPER_MODEL",
@@ -1044,11 +1164,24 @@ enum Env {
         return values
     }
 
-    /// Pure: KEY=VALUE, optional `export`, full-line `#` comments, optional quoting.
-    /// Covered by `--selftest`.
+    private static func warnIfReadable() {
+        permissionsChecked.lock()
+        defer { permissionsChecked.unlock() }
+        guard !permissionsWarned else { return }
+        permissionsWarned = true
+        guard let mode = (try? FileManager.default.attributesOfItem(atPath: file.path))?[.posixPermissions]
+                as? Int, mode & 0o077 != 0 else { return }
+        Log.write("\(file.path) is readable by other users (mode \(String(mode, radix: 8))); "
+                  + "run chmod 600 on it")
+    }
+
+    /// Pure: KEY=VALUE, optional `export`, full-line `#` comments, optional quoting,
+    /// CRLF tolerated. Covered by `--selftest`.
     static func parse(_ contents: String) -> [String: String] {
         var values: [String: String] = [:]
-        for rawLine in contents.split(separator: "\n", omittingEmptySubsequences: false) {
+        // By `isNewline`, not "\n": Swift treats "\r\n" as one Character, so a CRLF file
+        // would otherwise never be split at all and every key would carry a stray return.
+        for rawLine in contents.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline) {
             var line = rawLine.trimmingCharacters(in: .whitespaces)
             if line.isEmpty || line.hasPrefix("#") { continue }
             if line.hasPrefix("export ") { line = String(line.dropFirst(7)) }

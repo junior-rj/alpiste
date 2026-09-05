@@ -137,7 +137,10 @@ enum Recorder {
 
         let directory = capturesDirectory
             .appendingPathComponent("alpiste-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        // Owner-only: the recording lives here for hours, and every local account is in
+        // `staff`, which the home directory lets through.
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
 
         let config = SCStreamConfiguration()
         config.capturesAudio = true
@@ -401,7 +404,7 @@ final class AudioTap: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        NSLog("alpiste: stream stopped with error: \(error)")
+        Log.write("capture stream reported an error — \(error.localizedDescription)")
         lock.lock()
         let alreadyStopped = stopped
         lock.unlock()
