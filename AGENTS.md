@@ -86,7 +86,7 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
   mensagem só com o que tinha conseguido mover e não contava o resto: move parcial destruía o
   `mic.caf` em silêncio, e move total falho fazia a nota dizer "raw audio left in captures/…" uma
   linha antes de apagar exatamente esse diretório. O gatilho mais provável da falha no move é
-  colisão de nome, então o `uniqueStem` sonda `caf` além de `md` e `m4a`. Resgate também escreve a
+  colisão de nome, então o `uniqueStem` sonda `-system.caf` e `-mic.caf` além de `md` e `m4a` (`Notes.artifactNames`). Resgate também escreve a
   linha `Audio:` com o `.caf`, senão o `--retranscribe` recusa justo a gravação que já falhou uma vez
 - Captura que **nunca virou nota** (crash, queda de energia, Forçar Encerramento) é varrida no
   launch por `Recorder.orphanedCaptures` e passa pelo `Notes.process`. Antes disso o áudio ficava
@@ -119,9 +119,10 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
   que faltava metade. Piorava o diagnóstico porque o modal que a queda levantava culpava a tampa,
   que nunca tinha sido fechada. A janela cobre o pipeline de propósito: o whisper roda por minutos
   e a tela apagando logo depois do stop o suspenderia. Tampa fechada continua **não** sendo
-  impedida (nada impede), e é justamente o caso que o `streamFailed` salva. O `hold` é idempotente
-  porque um segundo token vazaria o primeiro, e o `release` é devido por **toda** saída terminal de
-  `start()` e `stop()`, mesma disciplina do `finishTerminationIfPending`
+  impedida (nada impede), e é justamente o caso que o `streamFailed` salva. O `hold` devolve um
+  token de dono (um segundo `beginActivity` vazaria o primeiro, então ele só troca o dono), e o
+  `release(token)` é devido por **toda** saída terminal de `start()` e `stop()`, mesma disciplina
+  do `finishTerminationIfPending`
 - Stream do SCK que morre sozinho no meio da reunião (display desconectado, sleep/wake) é reportado
   via callback e salva o que foi capturado até ali, em vez de deixar a UI travada em "Recording".
   A causa comum é **tampa fechada no fim da reunião**: "Failed to find any displays or windows to
@@ -253,19 +254,6 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
   `<stem>-system.caf` e `<stem>-mic.caf`, nunca `<stem>.caf`, e a sonda errada deixava a
   segunda gravação do minuto colidir com a resgatada
 
-## Riscos aceitos (auditoria de 2026-09-05)
-- `/opt/homebrew/bin` é gravável pelo grupo admin e o app executa o que estiver lá com as
-  permissões de TCC dele. Inerente ao shell-out para o brew; validar assinatura do ffmpeg
-  quebraria instalação normal
-- O corpo do erro HTTP (400 chars) vai para log, alerta e nota. Os provedores não ecoam o
-  prompt nesses corpos, e o 413 do Groq é justamente o diagnóstico documentado acima
-- `kill(pid, SIGKILL)` depois de `isRunning` tem janela teórica de reuso de PID; Foundation
-  não expõe alternativa e ffmpeg/whisper honram o SIGTERM anterior
-- `--regenerate` e `--retranscribe` aceitam qualquer caminho de `.md`: é CLI do próprio usuário
-- Troca de formato do mic no meio da gravação (AirPods) continua contada e reportada como
-  faixa incompleta, não recuperada
-- `~/MeetingNotes` fica com o umask do usuário (é pasta dele); `captures/` e `Logs/Alpiste`
-  são criados em 700
 - `Tool.run` é assíncrono e tem timeout (default 30 min, whisper usa 4h): nunca bloqueia o
   cooperative pool do Swift Concurrency, e um processo pendurado não trava o pipeline pra sempre
 - Check único: `Alpiste.app/Contents/MacOS/Alpiste --selftest` (assíncrono; roda ffmpeg de verdade no mixer)
@@ -355,3 +343,17 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
   `import FoundationModels`) tem janela de contexto de só 4096 tokens (confirmado no `.swiftinterface`
   do SDK), insuficiente pra reunião longa — serviria no máximo de fallback pra reunião curta. Decisão:
   não implementar, deixar como está
+
+## Riscos aceitos (auditoria de 2026-09-05)
+- `/opt/homebrew/bin` é gravável pelo grupo admin e o app executa o que estiver lá com as
+  permissões de TCC dele. Inerente ao shell-out para o brew; validar assinatura do ffmpeg
+  quebraria instalação normal
+- O corpo do erro HTTP (400 chars) vai para log, alerta e nota. Os provedores não ecoam o
+  prompt nesses corpos, e o 413 do Groq é justamente o diagnóstico documentado acima
+- `kill(pid, SIGKILL)` depois de `isRunning` tem janela teórica de reuso de PID; Foundation
+  não expõe alternativa e ffmpeg/whisper honram o SIGTERM anterior
+- `--regenerate` e `--retranscribe` aceitam qualquer caminho de `.md`: é CLI do próprio usuário
+- Troca de formato do mic no meio da gravação (AirPods) continua contada e reportada como
+  faixa incompleta, não recuperada
+- `~/MeetingNotes` fica com o umask do usuário (é pasta dele); `captures/` e `Logs/Alpiste`
+  são criados em 700
