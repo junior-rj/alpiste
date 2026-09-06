@@ -243,22 +243,15 @@ whisper-cli -m ~/Library/Application\ Support/Alpiste/models/ggml-medium.bin \
 
 ## Release
 
-```sh
-./scripts/release.sh
-```
+Signed releases are produced by the author's own tooling, which regenerates the icon,
+archives, signs with Developer ID, packages a DMG, notarizes it with Apple, and staples the
+ticket. Output lands in `build/Alpiste-<version>.dmg`, where `<version>` comes from
+`MARKETING_VERSION` in `project.yml`; `scripts/pre-release.sh` regenerates the icon (needs
+`xcodegen` and Pillow).
 
-Regenerates the icon, archives, signs with Developer ID, packages a DMG, notarizes it with
-Apple, and staples the ticket. Requires a clean working tree, `xcodegen`, and Pillow (for
-the icon). Output lands in `build/Alpiste-<version>.dmg`, where `<version>` comes from
-`MARKETING_VERSION` in `project.yml`. Adjust the signing identity (`DEVELOPMENT_TEAM` in
-`project.yml`) and the notary profile (`NOTARY_PROFILE=...`, a keychain profile from
-`notarytool store-credentials`) to your own team.
-
-`scripts/release.sh` is a thin configuration wrapper: the flow itself lives in a shared
-script outside this repository (`../../scripts/release-macos.sh` in the author's
-workspace), so a fresh clone cannot run it as-is. The steps are the standard ones:
-`xcodebuild archive`, export with a Developer ID `ExportOptions.plist` generated from your
-team ID, `hdiutil` into a DMG, `notarytool submit --wait`, `stapler staple`.
+To release your own build, run the standard steps with your team's identity: `xcodebuild
+archive`, export with a Developer ID `ExportOptions.plist` generated from your team ID,
+`hdiutil` into a DMG, `notarytool submit --wait`, `stapler staple`.
 
 ## The icon
 
