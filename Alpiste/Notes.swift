@@ -158,8 +158,19 @@ enum Notes {
     /// Never overwrites. `uniqueStem` picked a free name a few minutes ago, before
     /// whisper ran; anything that landed on it since (a `--backfill` in a terminal, a
     /// second copy of the app) would be destroyed by a plain atomic write.
-    private static func writeNew(_ markdown: String, to destination: URL) throws {
-        try Data(markdown.utf8).write(to: destination, options: [.atomic, .withoutOverwriting])
+    ///
+    /// Not `Data.write(options: [.atomic, .withoutOverwriting])`: Foundation rejects
+    /// that pair with a fatalError, not a thrown error, and 0.5.11 crashed on every note
+    /// with the summary already in hand. Writing next to the destination and hard-linking
+    /// gives both guarantees: `link(2)` is atomic and fails with EEXIST when the name is
+    /// taken, which lands in the Desktop fallback like any other error. Covered by
+    /// `--selftest`.
+    static func writeNew(_ markdown: String, to destination: URL) throws {
+        let temporary = destination.deletingLastPathComponent()
+            .appendingPathComponent(".\(destination.lastPathComponent).tmp-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        try Data(markdown.utf8).write(to: temporary, options: [.withoutOverwriting])
+        try FileManager.default.linkItem(at: temporary, to: destination)
     }
 
     /// Pure: every file a recording may claim under `stem` in the notes folder. The
