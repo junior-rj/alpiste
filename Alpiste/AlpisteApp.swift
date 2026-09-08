@@ -1238,6 +1238,26 @@ enum SelfTest {
         expect(Notes.artifactNames(for: "x") == ["x.md", "x.m4a", "x-system.caf", "x-mic.caf"],
                "artifactNames: probes the names the rescue actually writes")
 
+        // The note write itself. 0.5.11 asked Data.write for `.atomic` together with
+        // `.withoutOverwriting`, and Foundation treats that pair as a fatalError, not a
+        // thrown error: every note crashed the app with the summary already in hand
+        // (2026-09-08). This runs the real function, so a trap here fails the suite.
+        do {
+            let dir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("alpiste-selftest-write-\(UUID().uuidString)")
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let note = dir.appendingPathComponent("note.md")
+            let first = (try? Notes.writeNew("first", to: note)) != nil
+            expect(first && (try? String(contentsOf: note, encoding: .utf8)) == "first",
+                   "writeNew: writes a new note")
+            let second = (try? Notes.writeNew("second", to: note)) != nil
+            expect(!second && (try? String(contentsOf: note, encoding: .utf8)) == "first",
+                   "writeNew: refuses to overwrite an existing note, by throwing")
+            let leftovers = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+            expect(leftovers == ["note.md"], "writeNew: leaves no temporary file behind")
+            try? FileManager.default.removeItem(at: dir)
+        }
+
         // The `Audio:` line is read back by --retranscribe and joined to the note's
         // folder; a name with a path in it would point ffmpeg outside ~/MeetingNotes.
         expect(Notes.isSafeAudioName("2026-07-31-2214.m4a"), "isSafeAudioName: a plain file name")

@@ -250,6 +250,13 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
 - `Backfill.sweep` honra cancelamento no sleep de 65 s: `try?` engolia o `CancellationError`
   que `scheduleRetries` dispara a cada nova gravação sem resumo, e o laço passava a mandar
   todas as notas de uma vez, a rajada de 8000 TPM que o sleep foi medido para evitar
+- **`Data.write` com `.atomic` + `.withoutOverwriting` é `fatalError`, não `throw`.** O
+  Foundation em Swift (macOS 26) aborta com "withoutOverwriting is not supported with
+  atomic", e o 0.5.11 crashou em **toda** nota, com o resumo já na mão, sem passar pelo
+  `catch` nem pelo fallback do Desktop (2026-09-08; o relaunch reprocessava a captura órfã,
+  gastava outra chamada do Groq e crashava de novo). `Notes.writeNew` escreve num temporário
+  ao lado e faz `linkItem`: `link(2)` é atômico e falha com EEXIST se o nome já existir.
+  Coberto pelo `--selftest`, que roda a função de verdade e cai se ela trapar
 - `Notes.artifactNames` é a lista de nomes que o `uniqueStem` sonda: o resgate grava
   `<stem>-system.caf` e `<stem>-mic.caf`, nunca `<stem>.caf`, e a sonda errada deixava a
   segunda gravação do minuto colidir com a resgatada
