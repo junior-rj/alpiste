@@ -238,7 +238,7 @@ final class AppState {
         case .recording: "Recording \(elapsed)"
         case .working(let step): step
         case .done(let url): "Saved \(url.lastPathComponent)"
-        case .retrying(let url): "Saved \(url.lastPathComponent) — notes pending, retrying"
+        case .retrying(let url): "Saved \(url.lastPathComponent), notes pending, retrying"
         case .recovered(let url): "Recovered notes for \(url.lastPathComponent)"
         case .failed(let message): "Failed: \(message)"
         }
@@ -447,7 +447,7 @@ final class AppState {
         }
         alert("Could not generate notes",
               "\(names) still \(files.count == 1 ? "has" : "have") no summary after every retry. "
-                + "The transcript and audio are safe — run\n\n"
+                + "The transcript and audio are safe. Run\n\n"
                 + "Alpiste --regenerate \(file.path)\n\nto try again.\n\n"
                 + "Details in \(Log.file.path)")
     }

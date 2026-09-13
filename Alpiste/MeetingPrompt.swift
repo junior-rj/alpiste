@@ -118,6 +118,9 @@ private struct PromptView: View {
                     .frame(width: 34, height: 34)
                     .background(.tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 9,
                                                                           style: .continuous))
+                    // Decorative: the "Meeting detected" title already says what this is,
+                    // so VoiceOver should not read the glyph as a second, wordless element.
+                    .accessibilityHidden(true)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Meeting detected")
@@ -127,7 +130,9 @@ private struct PromptView: View {
                     Text(subtitle ?? "A call is using your microphone.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
-                        .lineLimit(2)
+                        // Room for a long calendar title, or a shorter one wrapped at a
+                        // large Dynamic Type size, before it has to truncate.
+                        .lineLimit(3)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -179,6 +184,10 @@ private struct TimeoutBar: View {
                     .scaleEffect(x: depleted ? 0 : 1, anchor: .leading)
             }
             .frame(height: 3)
+            // VoiceOver can't perceive the depleting bar, so give it the same sentence the
+            // Reduce Motion branch shows, otherwise the panel would vanish without warning.
+            .accessibilityElement()
+            .accessibilityLabel("Dismisses on its own if you don't choose")
             .onAppear {
                 withAnimation(.linear(duration: duration)) { depleted = true }
             }

@@ -31,7 +31,10 @@ struct SettingsView: View {
                     case .notAsked:
                         Button("Allow Calendar Access…") { state.requestCalendarAccess() }
                     case .blocked:
-                        Button("Calendar Access Blocked — Open Settings") {
+                        LabeledContent("Calendar access") {
+                            Text("Blocked").foregroundStyle(.secondary)
+                        }
+                        Button("Open System Settings…") {
                             MeetingCalendar.openSystemSettings()
                         }
                     }
@@ -40,13 +43,19 @@ struct SettingsView: View {
 
             Section {
                 LabeledContent("Language", value: language)
-                LabeledContent("Groq API key", value: status(for: "GROQ_API_KEY"))
-                LabeledContent("Gemini API key", value: status(for: "GEMINI_API_KEY"))
-                LabeledContent("Local model", value: modelStatus)
+                LabeledContent("Groq API key") {
+                    ConfigStatus(ready: isSet("GROQ_API_KEY"), readyLabel: "Set", missingLabel: "Not set")
+                }
+                LabeledContent("Gemini API key") {
+                    ConfigStatus(ready: isSet("GEMINI_API_KEY"), readyLabel: "Set", missingLabel: "Not set")
+                }
+                LabeledContent("Local model") {
+                    ConfigStatus(ready: modelInstalled, readyLabel: "Installed", missingLabel: "Missing")
+                }
             } header: {
                 Text("Transcription")
             } footer: {
-                Text("Set keys and language in ~/.alpiste/.env")
+                Text("Set keys and language in \(Text("~/.alpiste/.env").monospaced()).")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -64,12 +73,32 @@ struct SettingsView: View {
 
     private var language: String { Notes.transcriptionLanguage(env) }
 
-    /// "Set" / "Not set" — never the value itself.
-    private func status(for key: String) -> String {
-        (env[key] ?? "").isEmpty ? "Not set" : "Set"
-    }
+    /// Whether a key is present. The value itself is never read into the UI.
+    private func isSet(_ key: String) -> Bool { !(env[key] ?? "").isEmpty }
 
-    private var modelStatus: String {
-        FileManager.default.fileExists(atPath: Notes.modelURL.path) ? "Installed" : "Missing"
+    private var modelInstalled: Bool {
+        FileManager.default.fileExists(atPath: Notes.modelURL.path)
+    }
+}
+
+/// A configuration row's value: a status glyph plus the same state in words. The glyph
+/// carries the color; the word carries the meaning for anyone who cannot see it, so color
+/// is never the only cue. A filled green check reads "ready"; an empty neutral circle reads
+/// "not configured" rather than "broken", because a single missing key is not an error when
+/// the other provider or the API fallback still works.
+private struct ConfigStatus: View {
+    let ready: Bool
+    let readyLabel: String
+    let missingLabel: String
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: ready ? "checkmark.circle.fill" : "circle")
+                .imageScale(.small)
+                .foregroundStyle(ready ? Color.green : Color.secondary)
+                .accessibilityHidden(true)
+            Text(ready ? readyLabel : missingLabel)
+                .foregroundStyle(.secondary)
+        }
     }
 }
