@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Alpiste's preferences. A native grouped `Form`: the tool should disappear into the
@@ -37,6 +38,20 @@ struct SettingsView: View {
                         Button("Open System Settings…") {
                             MeetingCalendar.openSystemSettings()
                         }
+                    }
+                }
+
+                HStack {
+                    Text("Meetings folder")
+                    Spacer()
+                    Text(state.outputDirectory.path).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                    Button("Change...") {
+                        let panel = NSOpenPanel()
+                        panel.canChooseDirectories = true
+                        panel.canChooseFiles = false
+                        panel.allowsMultipleSelection = false
+                        panel.directoryURL = state.outputDirectory
+                        if panel.runModal() == .OK, let url = panel.url { state.setOutputDirectory(url) }
                     }
                 }
             }

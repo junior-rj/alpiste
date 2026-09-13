@@ -452,6 +452,19 @@ final class AppState {
                 + "Details in \(Log.file.path)")
     }
 
+    // MARK: - Output folder
+
+    private static let outputDirectoryKey = Notes.outputDirectoryKey
+
+    /// Mirrors `UserDefaults` so the settings view can display and change it without
+    /// reaching into `Notes` directly.
+    private(set) var outputDirectory: URL = Notes.outputDirectory
+
+    func setOutputDirectory(_ url: URL) {
+        UserDefaults.standard.set(url.path, forKey: Self.outputDirectoryKey)
+        outputDirectory = Notes.outputDirectory
+    }
+
     // MARK: - Meeting watcher
 
     private static let autoStartKey = "AutoStartOnMeetings"
