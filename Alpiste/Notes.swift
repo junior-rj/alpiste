@@ -2,8 +2,34 @@ import Foundation
 
 /// Everything that happens after the recording stops: mix, transcribe, summarize, save.
 enum Notes {
-    static let outputDirectory = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("MeetingNotes", isDirectory: true)
+    /// UserDefaults key for the meetings repo the app writes into and pushes.
+    static let outputDirectoryKey = "OutputDirectory"
+
+    /// Default meetings repo (the sparrow-reunioes clone under the workspace).
+    static let defaultOutputDirectory = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Documents/Desenvolvimentos/sparrow_workspace/reunioes", isDirectory: true)
+
+    /// The configured meetings repo root. Reads UserDefaults so Settings can
+    /// change it; falls back to the default when unset or blank.
+    static var outputDirectory: URL {
+        if let p = UserDefaults.standard.string(forKey: outputDirectoryKey),
+           !p.trimmingCharacters(in: .whitespaces).isEmpty {
+            return URL(fileURLWithPath: p, isDirectory: true)
+        }
+        return defaultOutputDirectory
+    }
+
+    /// Transcripts subfolder (Mac writes here; committed to git).
+    static var transcriptsDirectory: URL { outputDirectory.appendingPathComponent("transcricoes", isDirectory: true) }
+
+    /// Recordings subfolder (audio; gitignored, pruned after 60 days).
+    static var recordingsDirectory: URL { outputDirectory.appendingPathComponent("gravacoes", isDirectory: true) }
+
+    /// Final URL for an artifact name, routed to the right subfolder by extension.
+    static func destinationURL(for name: String) -> URL {
+        outputDirectory.appendingPathComponent(SyncLogic.subfolder(for: name), isDirectory: true)
+            .appendingPathComponent(name)
+    }
 
     static let supportDirectory = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/Alpiste", isDirectory: true)
@@ -35,7 +61,9 @@ enum Notes {
         }
 
         do {
-            try FileManager.default.createDirectory(at: outputDirectory,
+            try FileManager.default.createDirectory(at: transcriptsDirectory,
+                                                    withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: recordingsDirectory,
                                                     withIntermediateDirectories: true)
         } catch {
             return (nil, ["Could not create \(outputDirectory.path): \(error.localizedDescription). "
@@ -49,8 +77,7 @@ enum Notes {
             // folder under the same stem, and colliding with it is the likeliest way for
             // the rescue's own move to fail.
             artifactNames(for: candidate).contains { name in
-                FileManager.default.fileExists(
-                    atPath: outputDirectory.appendingPathComponent(name).path)
+                FileManager.default.fileExists(atPath: destinationURL(for: name).path)
             }
         }
 
@@ -65,7 +92,7 @@ enum Notes {
             progress("Mixing audio…")
             let mixed = try await mix(capture)
             wav16k = mixed.wav16k
-            let destination = outputDirectory.appendingPathComponent("\(stem).m4a")
+            let destination = destinationURL(for: "\(stem).m4a")
             do {
                 try FileManager.default.moveItem(at: mixed.m4a, to: destination)
             } catch {
@@ -84,7 +111,7 @@ enum Notes {
             // Naming the rescued file matters as much as moving it: without an `Audio:`
             // line the note mentions it only in prose, `audioFileName` returns nil, and
             // `--retranscribe` refuses the one recording that already failed once.
-            audioFile = rescue.audioFile.map { outputDirectory.appendingPathComponent($0) }
+            audioFile = rescue.audioFile.map { destinationURL(for: $0) }
         }
 
         // 2. Transcribe. Local model wins; the API is only a fallback.
@@ -124,7 +151,7 @@ enum Notes {
                                      audioFile: audioFile?.lastPathComponent,
                                      sources: captured.isEmpty ? nil : captured.joined(separator: " + "),
                                      problems: problems)
-        let destination = outputDirectory.appendingPathComponent("\(stem).md")
+        let destination = destinationURL(for: "\(stem).md")
         let summaryPending = notes == nil && !transcript.isEmpty
         do {
             try Self.writeNew(markdown, to: destination)
@@ -231,7 +258,7 @@ enum Notes {
     /// The destination is a parameter so `--selftest` can exercise it against a scratch
     /// tree instead of the user's real notes folder.
     static func rescueRawAudio(_ capture: Recorder.Capture, stem: String,
-                               to destination: URL = outputDirectory) -> Rescue {
+                               to destination: URL = recordingsDirectory) -> Rescue {
         var rescued: [String] = []
         var stranded: [String] = []
         for (raw, suffix) in [(capture.systemAudio, "system"), (capture.microphone, "mic")] {

@@ -112,7 +112,7 @@ enum Backfill {
         let cutoff = Date().addingTimeInterval(-window)
         let keys: [URLResourceKey] = [.contentModificationDateKey]
         guard let entries = try? FileManager.default.contentsOfDirectory(
-            at: Notes.outputDirectory, includingPropertiesForKeys: keys) else { return [] }
+            at: Notes.transcriptsDirectory, includingPropertiesForKeys: keys) else { return [] }
 
         var pending: [URL] = []
         for entry in entries where entry.pathExtension == "md" {
