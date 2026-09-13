@@ -169,6 +169,8 @@ enum Notes {
                 if captureDirectoryMayGo {
                     try? FileManager.default.removeItem(at: capture.directory)
                 }
+                // No Sync.push here: the note landed on the Desktop, outside the repo,
+                // so there is nothing under transcricoes/ for git to add or commit.
                 return (fallback, problems, summaryPending)
             }
             problems.append("Raw files left in \(capture.directory.path).")
@@ -176,6 +178,7 @@ enum Notes {
         }
 
         if captureDirectoryMayGo { try? FileManager.default.removeItem(at: capture.directory) }
+        await Sync.push(reason: stem)
         Log.write("wrote \(destination.lastPathComponent)"
                     + (problems.isEmpty ? " cleanly"
                        : " with \(problems.count) problem(s): \(problems.joined(separator: "; "))"))
@@ -883,6 +886,7 @@ enum Notes {
         let rebuilt = compose(header: parts.header, problems: parts.problems,
                               notes: notes, transcript: parts.transcript)
         try rebuilt.write(to: file, atomically: true, encoding: .utf8)
+        await Sync.push(reason: file.deletingPathExtension().lastPathComponent)
     }
 
     /// Re-transcribes a saved note from the audio next to it, then re-summarizes, in
@@ -943,6 +947,7 @@ enum Notes {
         let rebuilt = compose(header: header, problems: problems, notes: notes,
                               transcript: transcript)
         try rebuilt.write(to: file, atomically: true, encoding: .utf8)
+        await Sync.push(reason: file.deletingPathExtension().lastPathComponent)
         return problems
     }
 
