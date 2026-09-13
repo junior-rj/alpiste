@@ -97,7 +97,34 @@ enum Backfill {
                 result.failed.append((file, error.localizedDescription))
             }
         }
+        await retryPendingSync()
+        pruneOldRecordings()
         return result
+    }
+
+    /// Retry a git push that a previous run left pending (offline, conflict, etc).
+    nonisolated private static func retryPendingSync() async {
+        let repo = Notes.outputDirectory
+        let state = Sync.pendingState(repo: repo)
+        guard SyncLogic.hasPending(porcelain: state.porcelain, unpushed: state.unpushed) else { return }
+        Log.write("backfill: pending sync detected, retrying push")
+        await Sync.push(reason: "backfill retry")
+    }
+
+    /// Delete .m4a recordings older than 60 days (audio is disposable and local).
+    nonisolated private static func pruneOldRecordings() {
+        let keys: [URLResourceKey] = [.contentModificationDateKey]
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: Notes.recordingsDirectory, includingPropertiesForKeys: keys) else { return }
+        let files: [(name: String, modified: Date)] = entries.map { url in
+            let d = (try? url.resourceValues(forKeys: Set(keys)).contentModificationDate) ?? .distantFuture
+            return (url.lastPathComponent, d)
+        }
+        let victims = Set(SyncLogic.retentionVictims(files, now: Date(), maxAgeDays: 60))
+        for url in entries where victims.contains(url.lastPathComponent) {
+            do { try FileManager.default.removeItem(at: url); Log.write("pruned old recording \(url.lastPathComponent)") }
+            catch { Log.write("prune FAILED \(url.lastPathComponent): \(error)") }
+        }
     }
 
     /// Recent `.md` files that have a transcript but no summary, oldest first.

@@ -158,8 +158,9 @@ enum Notes {
         } catch {
             problems.append("Could not write \(destination.path): \(error.localizedDescription)")
             // The Desktop, deliberately, and deliberately not swept afterwards: the
-            // backfill only ever looks inside `outputDirectory`, and turning it loose on
-            // the Desktop would mean rewriting markdown files this app never wrote. A note
+            // backfill only ever looks inside the `transcricoes` subfolder, and turning
+            // it loose on the Desktop would mean rewriting markdown files this app never
+            // wrote. A note
             // that lands here always carries an alert naming its path, and
             // `--regenerate <path>` still works on it by hand.
             let fallback = FileManager.default.homeDirectoryForCurrentUser
