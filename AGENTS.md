@@ -10,7 +10,9 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
 - Notas geradas por IA a partir da transcrição, por **dois provedores em cadeia** cuja ordem
   depende do tamanho do transcript: Groq lidera até 29.000 chars, Gemini acima disso, e o que
   não lidera fica de reserva. Detalhe e motivo em "Regras específicas"
-- Saída em `~/MeetingNotes/YYYY-MM-DD-HHMM.md` + `.m4a` ao lado
+- Saída num diretório configurável (default: o clone `sparrow_workspace/reunioes`, não mais
+  `~/MeetingNotes`), com `transcricoes/YYYY-MM-DD-HHMM.md` (versionado e empurrado por git) e
+  `gravacoes/*.m4a` ao lado (gitignored, podado após 60 dias). Detalhe e motivo em "Regras específicas"
 
 ## Contexto
 - Repo: https://github.com/junior-rj/alpiste (público desde 2026-08-27, MIT, releases com DMG
@@ -23,14 +25,20 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
 ## Arquivos importantes
 - project.yml — definição do projeto (rodar `xcodegen` após mudar)
 - Alpiste/Recorder.swift — SCStream, escreve system.caf e mic.caf separados
-- Alpiste/Notes.swift — mix ffmpeg, whisper, Groq/Gemini, escrita do markdown; `Tool` e `Env`
-- Alpiste/Backfill.swift — varredura que regenera resumos que falharam (launch e agendada)
+- Alpiste/Notes.swift — mix ffmpeg, whisper, Groq/Gemini, escrita do markdown roteada por extensão
+  para `transcricoes/`/`gravacoes/` e `Sync.push` ao concluir; `Tool` e `Env`
+- Alpiste/SyncLogic.swift — lógica pura (Foundation only): roteamento por extensão, vítimas de
+  retenção e se há trabalho pendente pra empurrar (testada por `swiftc` standalone em `Tests/SyncLogicTests.swift`)
+- Alpiste/Sync.swift — o lado impuro do git: add/commit/pull --rebase/push do `transcricoes/`, nunca lança
+- Alpiste/Backfill.swift — varredura que regenera resumos que falharam (launch e agendada) e, em todo
+  sweep, refaz push pendente e poda gravações com mais de 60 dias
 - Alpiste/MeetingWatcher.swift — detector de reunião: funções puras de classificação e
   casamento com o calendário, leitura do CoreAudio, e o `MeetingMonitor` que faz o polling
 - Alpiste/MeetingCalendar.swift — EventKit, só leitura, título e horário de término
 - Alpiste/MeetingPrompt.swift — o painel flutuante Record / Not now
 - Alpiste/SettingsView.swift — a janela de preferências (scene `Settings`): toggles de Launch at
-  login e Auto-start on Meetings, mais status read-only de transcrição
+  login e Auto-start on Meetings, o seletor da pasta de reuniões (Meetings folder, `NSOpenPanel`),
+  mais status read-only de transcrição
 - Alpiste/SleepGuard.swift — segura o assertion de energia enquanto grava e processa
 - Alpiste/Log.swift — registro persistente em `~/Library/Logs/Alpiste/alpiste.log`
 - Alpiste/AlpisteApp.swift — MenuBarExtra (`MenuContent`), scene `Settings`, máquina de estados,
@@ -78,6 +86,35 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
 - Permissão de Gravação de Tela só vale após relançar o app (o alerta já avisa)
 - SCK não tem modo só-áudio: o filtro de display é obrigatório, daí a superfície de vídeo 2x2 descartada
 - Config em `~/.alpiste/.env` (caminho absoluto fixo, porque o .app não acha um .env relativo ao repo)
+- **O diretório de saída é configurável e o default mudou.** `Notes.outputDirectory` lê a UserDefaults
+  `OutputDirectory` e cai no default `~/Documents/Desenvolvimentos/sparrow_workspace/reunioes` (o clone
+  do `sparrow-reunioes`), não mais `~/MeetingNotes`. A pasta é escolhida em Preferências ("Meetings
+  folder", `NSOpenPanel` de diretório; `AppState.setOutputDirectory` grava a UserDefaults e espelha).
+  As regras abaixo que citam `~/MeetingNotes` valem para essa pasta configurada
+- **Split transcrições/gravações.** Dentro do diretório de saída, `.md` vai para `transcricoes/` e
+  todo o resto (`.m4a`, `.caf` resgatado) para `gravacoes/`. O roteamento é por extensão em
+  `SyncLogic.subfolder(for:)` (pura), e `Notes.destinationURL(for:)` coloca cada artefato na subpasta
+  certa; as duas são criadas antes de escrever. `transcricoes/` é versionado e empurrado por git,
+  `gravacoes/` é gitignored e descartável (áudio é local). A varredura de resumo pendente do Backfill
+  agora olha `transcricoes/`, não a raiz
+- **A transcrição é empurrada por git ao concluir a nota.** Depois de escrever o `.md`, `Sync.push`
+  faz `git add transcricoes`, commita se houver algo staged (`transcricao: <stem>`), `git pull --rebase`
+  e `git push` no repo de saída. É o lado Mac do desenho reuniões-VPS: a VPS Oracle gera a ata a partir
+  da transcrição empurrada. **Nunca lança**: falha de sync não pode perder a nota já gravada, é só logada
+  e o Backfill retenta. Também roda após `--regenerate` e `--retranscribe`. **Não** roda quando a nota
+  cai no fallback do Desktop, que está fora do repo e não tem nada sob `transcricoes/` pra commitar
+- **`Sync` é autossuficiente, não usa `Tool.run`.** O `Tool.run` fixa o próprio environment e derrubaria
+  o `GIT_TERMINAL_PROMPT=0`, então o `Sync` monta o próprio `Process` com `PATH`, `HOME`, `LANG` e
+  `GIT_TERMINAL_PROMPT=0` (git travado nunca pede senha e penduraria o app). O git é achado por sondagem
+  dos caminhos do brew/sistema, mesma pegadinha do ffmpeg (o `.app` aberto pelo Finder não herda o PATH).
+  A saída de cada subcomando vai pra um log em `supportDirectory`, nunca por pipe (deadlock de buffer),
+  com timeout de 120s
+- **O Backfill refaz push pendente e poda gravações antigas em TODO sweep**, antes do guard de resumo
+  pendente, porque árvore limpa ainda pode ter commit esperando push ou gravação vencida, e `--backfill`
+  tem que checar as duas sempre. `retryPendingSync` empurra de novo quando `SyncLogic.hasPending` (commit
+  não empurrado, ou `git status --porcelain` do `transcricoes/` sujo). `pruneOldRecordings` apaga `.m4a`
+  com mais de 60 dias (`SyncLogic.retentionVictims`), fora do main actor (`Task.detached`), porque roda
+  também no launch
 - Falha em qualquer etapa ainda grava o .md e mantém o áudio. Nunca perder a gravação: mix falho
   resgata os .caf brutos para `~/MeetingNotes`, colisão de nome (mesmo minuto) ganha sufixo `-2`,
   `-3`..., e falha ao escrever o .md tenta `~/Desktop` como fallback antes de desistir
