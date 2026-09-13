@@ -64,6 +64,12 @@ enum Backfill {
         sweeping = true
         defer { sweeping = false }
 
+        // Unconditional, ahead of the pending-summary guard below: a clean tree can still
+        // have a commit waiting to push, or recordings past retention, and `--backfill`
+        // should always check both rather than only when a summary is missing.
+        await retryPendingSync()
+        await pruneOldRecordings()
+
         let pending = await pendingFiles()
         guard !pending.isEmpty else { return Result() }
         Log.write("backfill: \(pending.count) note(s) pending — "
@@ -97,8 +103,6 @@ enum Backfill {
                 result.failed.append((file, error.localizedDescription))
             }
         }
-        await retryPendingSync()
-        pruneOldRecordings()
         return result
     }
 
@@ -112,7 +116,15 @@ enum Backfill {
     }
 
     /// Delete .m4a recordings older than 60 days (audio is disposable and local).
-    nonisolated private static func pruneOldRecordings() {
+    ///
+    /// Off the main actor, same pattern as `pendingFiles`/`scan`: the directory listing,
+    /// per-file `stat`, and removal are real I/O and this runs on every sweep, including
+    /// at launch.
+    private static func pruneOldRecordings() async {
+        await Task.detached { pruneOldRecordingsSync() }.value
+    }
+
+    nonisolated private static func pruneOldRecordingsSync() {
         let keys: [URLResourceKey] = [.contentModificationDateKey]
         guard let entries = try? FileManager.default.contentsOfDirectory(
             at: Notes.recordingsDirectory, includingPropertiesForKeys: keys) else { return }

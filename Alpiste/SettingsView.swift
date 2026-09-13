@@ -45,7 +45,7 @@ struct SettingsView: View {
                     Text("Meetings folder")
                     Spacer()
                     Text(state.outputDirectory.path).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                    Button("Change...") {
+                    Button("Change…") {
                         let panel = NSOpenPanel()
                         panel.canChooseDirectories = true
                         panel.canChooseFiles = false
