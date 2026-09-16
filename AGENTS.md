@@ -48,7 +48,9 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
 - Release pela skill global `release-macos` (desde 05/09/2026; o wrapper `scripts/release.sh` saiu).
   Um comando faz build fora do repo, Developer ID, DMG, notarização, staple, instala em
   /Applications e publica. Config inferida do repo; o ícone é gerado pelo hook `scripts/pre-release.sh`
-  (probe do Pillow dentro dele). DMG versionado `build/Alpiste-X.Y.Z.dmg` + `build/export/Alpiste-stapled.app`.
+  (probe do Pillow dentro dele; se nenhum python tem PIL, ele bootstrappa um venv persistente
+  em `~/Library/Caches/Alpiste/icon-venv` e reusa, porque o brew python 3.14 barra `pip install`
+  global por PEP 668). DMG versionado `build/Alpiste-X.Y.Z.dmg` + `build/export/Alpiste-stapled.app`.
   O perfil de notary vem da variável `NOTARY_PROFILE` (perfil do keychain criado com
   `notarytool store-credentials`).
   No fim ele pergunta ao LaunchServices quais `Alpiste.app` estão registrados e desregistra tudo
