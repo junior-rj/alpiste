@@ -4,7 +4,7 @@ options:
   deploymentTarget:
     # 15.0 is the floor for SCStreamConfiguration.captureMicrophone
     macOS: "15.0"
-  xcodeVersion: "16.0"
+  xcodeVersion: "27.0"
   createIntermediateGroups: true
   defaultConfig: Debug
 

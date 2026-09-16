@@ -254,7 +254,11 @@ final class AppState {
         meetingTitle = title
         phase = .working("Starting…")
 
-        Task {
+        // Explicit strong capture: this task drives the whole recording start and legitimately
+        // holds self for its duration, while `onStreamError` below captures self weakly on
+        // purpose. Swift 6.4's ImplicitStrongCapture diagnostic requires the outer capture to be
+        // explicit when a nested closure differs.
+        Task { [self] in
             // Before the permission checks and before `Recorder.start`, whose own ceiling is
             // 45 s: none of that can be left racing an idle display.
             let token = sleepGuard.hold("recording a meeting")
