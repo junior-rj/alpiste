@@ -872,38 +872,71 @@ enum SelfTest {
         expect(Notes.noteHeader("no title line") == nil,
                "noteHeader: nil without a title")
 
-        // Provider order is a deliberate call, not an accident of how the ifs are typed:
-        // Gemini's free tier caps at 20 requests a day and lost three meetings in two
-        // days, while Groq answered every time it was asked. Groq leads.
+        // Provider order is a deliberate call, not an accident of how the ifs are typed.
+        // Codex leads whenever the CLI is installed and logged in: it bills the ChatGPT
+        // subscription, not a per-minute token cap, so a 126-minute meeting (63549
+        // characters on 2026-09-24) is the case it exists for. Behind it, Gemini's free
+        // tier caps at 20 requests a day and lost three meetings in two days, while Groq
+        // answered every time it was asked. Groq leads the API pair.
         let bothKeys = ["GROQ_API_KEY": "g", "GEMINI_API_KEY": "x"]
         let short = 5_000
         // The transcript that hit Groq's 413 on 2026-08-20: 38772 characters, which the
         // API counted as 9475 tokens against an 8000-per-minute cap.
         let long = 38_772
 
-        expect(Notes.summaryProviders(bothKeys, transcriptCharacters: short) == [.groq, .gemini],
+        expect(Notes.summaryProviders(bothKeys, transcriptCharacters: short, codexInstalled: false)
+                == [.groq, .gemini],
                "summaryProviders: Groq leads on a short transcript")
-        expect(Notes.summaryProviders(bothKeys, transcriptCharacters: long) == [.gemini, .groq],
+        expect(Notes.summaryProviders(bothKeys, transcriptCharacters: long, codexInstalled: false)
+                == [.gemini, .groq],
                "summaryProviders: Gemini leads on a transcript too long for Groq")
         // Reordering, not dropping: on 2026-08-20 Gemini answered 503 four times running,
         // and a list with one provider left in it would have had nowhere to fall through to.
-        expect(Notes.summaryProviders(bothKeys, transcriptCharacters: long).count == 2,
+        expect(Notes.summaryProviders(bothKeys, transcriptCharacters: long, codexInstalled: false).count == 2,
                "summaryProviders: the long-transcript order keeps Groq as the fallback")
-        expect(Notes.summaryProviders(bothKeys, transcriptCharacters: Notes.groqTranscriptLimit)
-                == [.groq, .gemini],
+        expect(Notes.summaryProviders(bothKeys, transcriptCharacters: Notes.groqTranscriptLimit,
+                                      codexInstalled: false) == [.groq, .gemini],
                "summaryProviders: the limit itself still leads with Groq")
-        expect(Notes.summaryProviders(bothKeys, transcriptCharacters: Notes.groqTranscriptLimit + 1)
-                == [.gemini, .groq],
+        expect(Notes.summaryProviders(bothKeys, transcriptCharacters: Notes.groqTranscriptLimit + 1,
+                                      codexInstalled: false) == [.gemini, .groq],
                "summaryProviders: one character past the limit flips the order")
-        expect(Notes.summaryProviders(["GEMINI_API_KEY": "x"], transcriptCharacters: short) == [.gemini],
+        expect(Notes.summaryProviders(["GEMINI_API_KEY": "x"], transcriptCharacters: short,
+                                      codexInstalled: false) == [.gemini],
                "summaryProviders: Gemini alone when Groq has no key")
-        expect(Notes.summaryProviders(["GROQ_API_KEY": "g"], transcriptCharacters: short) == [.groq],
+        expect(Notes.summaryProviders(["GROQ_API_KEY": "g"], transcriptCharacters: short,
+                                      codexInstalled: false) == [.groq],
                "summaryProviders: Groq alone when Gemini has no key")
-        expect(Notes.summaryProviders(["GROQ_API_KEY": "g"], transcriptCharacters: long) == [.groq],
+        expect(Notes.summaryProviders(["GROQ_API_KEY": "g"], transcriptCharacters: long,
+                                      codexInstalled: false) == [.groq],
                "summaryProviders: a long transcript still tries Groq when it is the only key")
         expect(Notes.summaryProviders(["GEMINI_API_KEY": "", "GROQ_API_KEY": ""],
-                                      transcriptCharacters: short).isEmpty,
+                                      transcriptCharacters: short, codexInstalled: false).isEmpty,
                "summaryProviders: an empty key does not count as configured")
+
+        // Codex sits in front of the API pair and never disturbs their order: the two
+        // API keys stay as the fallback in exactly the order they had without it.
+        expect(Notes.summaryProviders(bothKeys, transcriptCharacters: short, codexInstalled: true)
+                == [.codex, .groq, .gemini],
+               "summaryProviders: Codex leads a short transcript, Groq then Gemini behind it")
+        expect(Notes.summaryProviders(bothKeys, transcriptCharacters: long, codexInstalled: true)
+                == [.codex, .gemini, .groq],
+               "summaryProviders: Codex leads a long transcript, Gemini then Groq behind it")
+        expect(Notes.summaryProviders([:], transcriptCharacters: long, codexInstalled: true) == [.codex],
+               "summaryProviders: Codex alone needs no API key at all")
+        // The off switch: a machine where Codex is logged in for other work but the
+        // meeting notes should keep going through the APIs.
+        expect(Notes.summaryProviders(["CODEX_NOTES": "0"] .merging(bothKeys) { a, _ in a },
+                                      transcriptCharacters: short, codexInstalled: true) == [.groq, .gemini],
+               "summaryProviders: CODEX_NOTES=0 takes Codex out of the chain")
+        expect(Notes.summaryProviders(["CODEX_NOTES": "off"], transcriptCharacters: short,
+                                      codexInstalled: true).isEmpty,
+               "summaryProviders: CODEX_NOTES=off also disables it")
+        expect(Notes.summaryProviders(["CODEX_NOTES": "1"], transcriptCharacters: short,
+                                      codexInstalled: true) == [.codex],
+               "summaryProviders: CODEX_NOTES=1 keeps it on")
+        expect(Notes.summaryProviders(["CODEX_NOTES": "1"], transcriptCharacters: short,
+                                      codexInstalled: false).isEmpty,
+               "summaryProviders: no CLI means no Codex, whatever the .env says")
 
         // The alert path keys off this prefix to tell a failure the backfill will retry
         // from one it cannot. If the two drift apart, every summary failure goes back to

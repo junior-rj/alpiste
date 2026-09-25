@@ -7,9 +7,11 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
 - App novo em SwiftUI, macOS 15+ (piso do `SCStreamConfiguration.captureMicrophone`)
 - Captura de áudio da reunião (sistema + microfone) via ScreenCaptureKit
 - Transcrição local com whisper.cpp (modelo medium), API só como fallback
-- Notas geradas por IA a partir da transcrição, por **dois provedores em cadeia** cuja ordem
-  depende do tamanho do transcript: Groq lidera até 29.000 chars, Gemini acima disso, e o que
-  não lidera fica de reserva. Detalhe e motivo em "Regras específicas"
+- Notas geradas por IA a partir da transcrição, por **até três provedores em cadeia**: o Codex
+  CLI lidera quando está instalado e logado (cota da assinatura ChatGPT, sem chave e sem teto
+  por minuto); atrás dele a dupla de APIs mantém a ordem por tamanho do transcript, Groq até
+  29.000 chars e Gemini acima disso, e o que não lidera fica de reserva. Detalhe e motivo em
+  "Regras específicas"
 - Saída num diretório configurável (default: o clone `sparrow_workspace/reunioes`, não mais
   `~/MeetingNotes`), com `transcricoes/YYYY-MM-DD-HHMM.md` (versionado e empurrado por git) e
   `gravacoes/*.m4a` ao lado (gitignored, podado após 60 dias). Detalhe e motivo em "Regras específicas"
@@ -38,7 +40,7 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
 - Alpiste/MeetingPrompt.swift — o painel flutuante Record / Not now
 - Alpiste/SettingsView.swift — a janela de preferências (scene `Settings`): toggles de Launch at
   login e Auto-start on Meetings, o seletor da pasta de reuniões (Meetings folder, `NSOpenPanel`),
-  mais status read-only de transcrição
+  mais status read-only de transcrição (Codex CLI, chaves, modelo local)
 - Alpiste/SleepGuard.swift — segura o assertion de energia enquanto grava e processa
 - Alpiste/Log.swift — registro persistente em `~/Library/Logs/Alpiste/alpiste.log`
 - Alpiste/AlpisteApp.swift — MenuBarExtra (`MenuContent`), scene `Settings`, máquina de estados,
@@ -220,9 +222,24 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
   transcripts arruinados corriam 80 e 39 linhas, o pior saudável chegou a 8 ("Bom dia." enquanto a
   reunião enche). A mensagem **nunca cita a linha repetida**, porque `problems` é ecoado no log e
   conteúdo de reunião não pode ir para lá
-- Resumo tem dois provedores em cadeia, e a ordem **depende do tamanho do transcript**
-  (`Notes.summaryProviders`, função pura coberta pelo `--selftest`; se mudar a ordem, mude o teste
-  junto e de propósito). Até `Notes.groqTranscriptLimit` (29.000 chars) o **Groq lidera**
+- **O Codex CLI é o primeiro provedor de resumo quando existe** (`Notes.codexInstalled`: binário
+  em caminho do brew e `~/.codex/auth.json` presente; `CODEX_NOTES=0` no `.env` desliga,
+  `CODEX_MODEL` sobrepõe o modelo). Entrou em 24/09/2026 porque a reunião de 126 min (63.549
+  chars) caiu no 413 do Groq três vezes e não havia chave do Gemini: o Codex cobra da assinatura
+  ChatGPT e não tem teto por minuto. `summarizeViaCodex` roda `codex exec` **hermético**, e cada
+  flag paga uma pegadinha medida: `--ephemeral` (sessão fora do disco), `-s read-only` (é um
+  agente, não um endpoint), `--disable hooks` (os hooks globais do `~/.codex/hooks.json`
+  injetavam o índice do `erros.md` no prompt do resumo, ~500 tokens de contexto alheio),
+  `-c notify=[]` (o `notify` do `config.toml` dispara o cliente do Computer Use a cada turno) e
+  `-C` numa pasta temporária vazia em `supportDirectory` (sem repo pra ler). O `~/.codex/AGENTS.md`
+  global ainda carrega, e `--ignore-user-config` não resolve isso e ainda derruba o modelo
+  configurado, por isso não é usado. Prompt e transcript entram por **stdin de arquivo**
+  (`Tool.run(standardInput:)`), nunca por argv (`ps` e ARG_MAX); a resposta volta por `-o`, e o
+  stdout é descartado porque o Codex ecoa a resposta lá e a cauda do log iria pro `alpiste.log`.
+  A pasta temporária sai no `defer`, log incluso. Medido: 63.549 chars em 19 s
+- Resumo tem a dupla de APIs em cadeia atrás do Codex, e a ordem delas **depende do tamanho do
+  transcript** (`Notes.summaryProviders`, função pura coberta pelo `--selftest`; se mudar a ordem,
+  mude o teste junto e de propósito). Até `Notes.groqTranscriptLimit` (29.000 chars) o **Groq lidera**
   (`GROQ_API_KEY`, modelo padrão `openai/gpt-oss-120b`, override por `GROQ_MODEL`) por
   confiabilidade medida: o free tier do Gemini tem cota de 20 requisições/dia e deixou 3 reuniões
   sem resumo em 2 dias, uma delas despercebida por um dia. Acima do limite a ordem inverte e o

@@ -21,9 +21,11 @@ the transcript into notes, and even that is optional.
 1. Records system audio and your microphone with ScreenCaptureKit.
 2. Mixes them into one `.m4a` with ffmpeg.
 3. Transcribes with a local whisper.cpp `medium` model.
-4. Sends the transcript out for a 5-bullet summary, decisions, and action items. Two
-   providers are tried in order, and the order depends on transcript size: Groq leads up
-   to 29,000 characters, Gemini above that. Whichever does not lead stays as the backup.
+4. Sends the transcript out for a 5-bullet summary, decisions, and action items. Up to
+   three providers are tried in order. The Codex CLI leads whenever it is installed and
+   logged in (it bills a ChatGPT subscription, so length is no concern). Behind it the two
+   API providers keep their own order, which depends on transcript size: Groq leads up to
+   29,000 characters, Gemini above that. Whichever does not lead stays as the backup.
 5. Writes `~/MeetingNotes/YYYY-MM-DD-HHMM.md` with the notes on top, the full transcript
    below a divider, and the audio alongside as `YYYY-MM-DD-HHMM.m4a`. The audio line also
    names which sources actually got captured (`system audio`, `microphone`, or both), and
@@ -121,12 +123,17 @@ call and not your own voice.
 `~/.alpiste/.env`, created by `setup.sh`. Real environment variables override the file.
 
 ```sh
-# Notes generation, first choice. Free tier: https://console.groq.com/keys
+# Notes generation, first choice when the Codex CLI is installed and logged in
+# (`brew install codex`, then `codex login`). No key: it bills the ChatGPT subscription.
+# CODEX_NOTES=0           # set to 0/off to keep Codex out of the chain
+# CODEX_MODEL=            # defaults to the model in ~/.codex/config.toml
+
+# Notes generation, first API choice. Free tier: https://console.groq.com/keys
 # Also transcribes when the local whisper model is missing.
 GROQ_API_KEY=...
 # GROQ_MODEL=             # defaults to openai/gpt-oss-120b
 
-# Notes generation, fallback when Groq fails, and first choice above 29,000 characters.
+# Notes generation, fallback when Groq fails, and first API choice above 29,000 characters.
 # Free tier: https://aistudio.google.com/apikey. Capped at 20 requests a day, which is why
 # it is second, but its context window is far larger.
 # GEMINI_API_KEY=
@@ -157,6 +164,11 @@ Groq's `on_demand` tier caps at 8,000 tokens per minute and refuses an oversized
 with **HTTP 413**, not 429, which reads like a payload limit without being one. That cap,
 not the model's 131k context window, is what puts the 29,000-character threshold where it
 is.
+
+The Codex provider runs `codex exec` hermetically: an ephemeral session, read-only
+sandbox, hooks disabled, notifier silenced, and an empty scratch folder as its working
+directory. The prompt goes in through stdin and the answer comes back through a file, so
+nothing from the meeting reaches the process list or Alpiste's log.
 
 The path is absolute and fixed rather than relative to this repo, because the `.app` needs
 to find it from wherever you install it.

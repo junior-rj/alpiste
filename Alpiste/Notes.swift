@@ -520,16 +520,36 @@ enum Notes {
         """
 
     enum Summarizer: String {
+        case codex = "Codex"
         case groq = "Groq"
         case gemini = "Gemini"
 
-        var keyName: String {
+        /// The `.env` key that configures the provider. Codex has none: it signs in
+        /// through its own CLI and is detected by `codexInstalled()` instead.
+        var keyName: String? {
             switch self {
+            case .codex: nil
             case .groq: "GROQ_API_KEY"
             case .gemini: "GEMINI_API_KEY"
             }
         }
     }
+
+    /// Where `codex login` leaves its session. Existing and a `codex` binary on a brew
+    /// path is what "configured" means for a provider that has no API key.
+    static let codexAuthFile = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".codex/auth.json")
+
+    /// Checked per call, never cached: a login that expired or a `brew uninstall`
+    /// should drop the provider on the next meeting, not the next launch.
+    static func codexInstalled() -> Bool {
+        Tool.find("codex") != nil && FileManager.default.fileExists(atPath: codexAuthFile.path)
+    }
+
+    /// `CODEX_NOTES` values that take Codex out of the chain while the CLI stays
+    /// installed for other work. Anything else, including the key being absent, keeps
+    /// it on: the CLI being logged in is opt-in enough.
+    static let codexDisabledValues: Set<String> = ["0", "false", "off", "no"]
 
     /// The longest transcript worth sending to Groq first.
     ///
@@ -555,22 +575,30 @@ enum Notes {
 
     /// Pure: the summarizers that are configured, in the order to try them.
     ///
-    /// Groq leads on measured reliability, not preference: Gemini's free tier caps at 20
-    /// requests a day and left three meetings unsummarized across two days, one of them
-    /// unnoticed for a day. But Groq cannot take a long meeting at all (see
-    /// `groqTranscriptLimit`), so past that length the order flips and Gemini's far
-    /// larger context window leads instead.
+    /// Codex leads whenever its CLI is installed and logged in. It bills the ChatGPT
+    /// subscription, not a per-minute token cap, so transcript length stops deciding
+    /// who goes first: the 126-minute meeting of 2026-09-24 (63549 characters) was
+    /// refused by Groq's 8000 TPM three times over, with no Gemini key to fall back to.
+    ///
+    /// Behind it the API pair keeps its own order. Groq leads on measured reliability,
+    /// not preference: Gemini's free tier caps at 20 requests a day and left three
+    /// meetings unsummarized across two days, one of them unnoticed for a day. But Groq
+    /// cannot take a long meeting at all (see `groqTranscriptLimit`), so past that
+    /// length the pair flips and Gemini's far larger context window leads it instead.
     ///
     /// This reorders and never drops: whichever provider cannot lead is still the
     /// fallback. That is what saved 2026-08-20, when Gemini answered 503 four times
     /// running — a chain with one provider in it would have had nowhere left to go.
     /// Covered by `--selftest`.
-    static func summaryProviders(_ env: [String: String],
-                                 transcriptCharacters: Int) -> [Summarizer] {
-        let order: [Summarizer] = transcriptCharacters > groqTranscriptLimit
+    static func summaryProviders(_ env: [String: String], transcriptCharacters: Int,
+                                 codexInstalled: Bool) -> [Summarizer] {
+        let apiOrder: [Summarizer] = transcriptCharacters > groqTranscriptLimit
             ? [.gemini, .groq]
             : [.groq, .gemini]
-        return order.filter { !(env[$0.keyName] ?? "").isEmpty }
+        let apis = apiOrder.filter { !(env[$0.keyName ?? ""] ?? "").isEmpty }
+        let codexEnabled = codexInstalled
+            && !codexDisabledValues.contains((env["CODEX_NOTES"] ?? "").lowercased())
+        return codexEnabled ? [.codex] + apis : apis
     }
 
     /// Two independent providers, so an outage on one no longer costs a meeting's
@@ -578,20 +606,22 @@ enum Notes {
     /// separates "the note is missing" from "the note is missing and here is why".
     static func summarize(_ transcript: String) async throws -> String {
         let env = Env.load()
-        let providers = summaryProviders(env, transcriptCharacters: transcript.count)
+        let providers = summaryProviders(env, transcriptCharacters: transcript.count,
+                                         codexInstalled: codexInstalled())
         Log.write("summarize: \(transcript.count) characters, "
                     + "providers \(providers.map(\.rawValue).joined(separator: " then "))")
         guard !providers.isEmpty else {
-            Log.write("summarize: no API key configured, skipping")
+            Log.write("summarize: no Codex login and no API key configured, skipping")
             throw Failure.noLLMKey
         }
 
         var failures: [String] = []
         for provider in providers {
-            let key = env[provider.keyName] ?? ""
+            let key = provider.keyName.flatMap { env[$0] } ?? ""
             do {
                 let notes: String
                 switch provider {
+                case .codex: notes = try await summarizeViaCodex(transcript, env: env)
                 case .groq: notes = try await summarizeViaGroq(transcript, key: key, env: env)
                 case .gemini: notes = try await summarizeViaGemini(transcript, key: key, env: env)
                 }
@@ -606,6 +636,49 @@ enum Notes {
             }
         }
         throw Failure.badResponse(failures.joined(separator: " / "))
+    }
+
+    /// Codex CLI in non-interactive mode (`codex exec`), billed to the ChatGPT
+    /// subscription. No key, no per-minute cap: it is the provider that takes a
+    /// two-hour meeting whole.
+    ///
+    /// Run hermetically, because `codex exec` is an agent, not a completion endpoint:
+    /// `--ephemeral` keeps the session off disk, `-s read-only` stops it writing
+    /// anything, `--disable hooks` keeps the user's SessionStart and UserPromptSubmit
+    /// hooks (and whatever they inject) out of the prompt, and `-c notify=[]` silences
+    /// the turn-ended notifier from `~/.codex/config.toml`. Measured 2026-09-24: the
+    /// hooks alone added ~500 tokens of unrelated context to a one-line probe. The
+    /// working directory is an empty scratch folder, so there is no repo for it to read.
+    ///
+    /// Prompt and transcript go in through stdin (a file, never argv), and the answer
+    /// comes back through `-o`. Stdout is discarded: Codex echoes the answer there too,
+    /// and the `Tool.run` log tail that lands in the error message must never carry
+    /// meeting content. The scratch folder, log included, is removed on the way out.
+    private static func summarizeViaCodex(_ transcript: String,
+                                          env: [String: String]) async throws -> String {
+        guard let codex = Tool.find("codex") else { throw Failure.missingTool("codex") }
+        let scratch = supportDirectory
+            .appendingPathComponent("codex-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: scratch) }
+
+        let input = scratch.appendingPathComponent("input.txt")
+        try "\(prompt)\n\n\(transcript)\n".write(to: input, atomically: true, encoding: .utf8)
+        let output = scratch.appendingPathComponent("notes.md")
+
+        var args = ["exec", "--ephemeral", "--skip-git-repo-check", "-s", "read-only",
+                    "--color", "never", "--disable", "hooks", "-c", "notify=[]",
+                    "-C", scratch.path, "-o", output.path]
+        if let model = env["CODEX_MODEL"], !model.isEmpty { args += ["-m", model] }
+        try await Tool.run(codex, args, in: scratch, label: "codex", timeout: 600,
+                           discardStandardOutput: true, standardInput: input)
+
+        guard let text = try? String(contentsOf: output, encoding: .utf8),
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw Failure.badResponse("Codex returned an empty response")
+        }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func summarizeViaGemini(_ transcript: String, key: String,
@@ -1059,7 +1132,8 @@ enum Notes {
             case .noTranscriber:
                 "No local model at \(Notes.modelURL.path) and no GROQ_API_KEY or OPENAI_API_KEY set."
             case .noLLMKey:
-                "No GEMINI_API_KEY or GROQ_API_KEY set, so the transcript was saved without notes."
+                "No Codex CLI login and no GEMINI_API_KEY or GROQ_API_KEY set, "
+                + "so the transcript was saved without notes."
             case .commandFailed(let name, let code, let log):
                 "\(name) exited with code \(code). \(log)"
             case .badResponse(let detail):
@@ -1097,15 +1171,27 @@ enum Tool {
     /// error message, which is echoed to `alpiste.log` and shown in an alert. Meeting
     /// content must never reach either. Nothing is lost by dropping it: `-otxt` writes
     /// the real output to a file, and stderr still carries the diagnostics.
+    /// `standardInput` feeds the child from a file instead of the app's own stdin, for
+    /// a tool that reads its payload there (codex); an argv payload would show up in
+    /// `ps` and hit ARG_MAX on a long meeting.
     static func run(_ executable: URL, _ args: [String], in directory: URL,
                     label: String, timeout: TimeInterval = 1800,
-                    discardStandardOutput: Bool = false) async throws {
+                    discardStandardOutput: Bool = false,
+                    standardInput: URL? = nil) async throws {
         let log = directory.appendingPathComponent("\(label).log")
         FileManager.default.createFile(atPath: log.path, contents: nil)
         guard let handle = try? FileHandle(forWritingTo: log) else {
             throw Notes.Failure.commandFailed(label, -1, "could not open log file")
         }
         defer { try? handle.close() }
+        var inputHandle: FileHandle?
+        if let standardInput {
+            guard let opened = try? FileHandle(forReadingFrom: standardInput) else {
+                throw Notes.Failure.commandFailed(label, -1, "could not open stdin file")
+            }
+            inputHandle = opened
+        }
+        defer { try? inputHandle?.close() }
 
         let process = Process()
         process.executableURL = executable
@@ -1121,6 +1207,7 @@ enum Tool {
         ]
         process.standardOutput = discardStandardOutput ? FileHandle.nullDevice : handle
         process.standardError = handle
+        if let inputHandle { process.standardInput = inputHandle }
 
         let (stream, continuation) = AsyncStream<Void>.makeStream()
         // Set before run(): a process that exits immediately must not be able to
@@ -1196,7 +1283,8 @@ enum Env {
     static func load() -> [String: String] {
         warnIfReadable()
         var values = parse((try? String(contentsOf: file, encoding: .utf8)) ?? "")
-        for key in ["GEMINI_API_KEY", "GEMINI_MODEL", "GROQ_API_KEY", "GROQ_MODEL",
+        for key in ["CODEX_NOTES", "CODEX_MODEL",
+                    "GEMINI_API_KEY", "GEMINI_MODEL", "GROQ_API_KEY", "GROQ_MODEL",
                     "GROQ_WHISPER_MODEL", "OPENAI_API_KEY", "OPENAI_WHISPER_MODEL",
                     "WHISPER_LANGUAGE",
                     "MEETING_APPS", "MEETING_DEBOUNCE_SECONDS", "MEETING_STOP_GRACE_MINUTES",

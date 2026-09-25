@@ -58,6 +58,9 @@ struct SettingsView: View {
 
             Section {
                 LabeledContent("Language", value: language)
+                LabeledContent("Codex CLI") {
+                    ConfigStatus(ready: codexReady, readyLabel: "Logged in", missingLabel: "Not found")
+                }
                 LabeledContent("Groq API key") {
                     ConfigStatus(ready: isSet("GROQ_API_KEY"), readyLabel: "Set", missingLabel: "Not set")
                 }
@@ -90,6 +93,13 @@ struct SettingsView: View {
 
     /// Whether a key is present. The value itself is never read into the UI.
     private func isSet(_ key: String) -> Bool { !(env[key] ?? "").isEmpty }
+
+    /// Installed and logged in, unless `CODEX_NOTES` switches it off: the same test the
+    /// provider chain applies, so the row and the chain cannot disagree.
+    private var codexReady: Bool {
+        Notes.summaryProviders(env, transcriptCharacters: 0,
+                               codexInstalled: Notes.codexInstalled()).contains(.codex)
+    }
 
     private var modelInstalled: Bool {
         FileManager.default.fileExists(atPath: Notes.modelURL.path)

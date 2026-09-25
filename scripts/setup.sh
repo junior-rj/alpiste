@@ -35,7 +35,12 @@ if [ ! -f "$HOME/.alpiste/.env" ]; then
   # umask first: the file must never exist world-readable, not even between the write
   # and the chmod below.
   (umask 077; cat > "$HOME/.alpiste/.env" <<'EOF'
-# Notes generation, first choice. Free tier: https://console.groq.com/keys
+# Notes generation, first choice when the Codex CLI is installed and logged in
+# (`brew install codex`, then `codex login`). No key: it bills the ChatGPT subscription.
+# CODEX_NOTES=0           # set to 0/off to keep Codex out of the chain
+# CODEX_MODEL=            # defaults to the model in ~/.codex/config.toml
+
+# Notes generation, first API choice. Free tier: https://console.groq.com/keys
 # Also transcribes when the local whisper model is missing.
 GROQ_API_KEY=
 # Optional, defaults to openai/gpt-oss-120b. Groq retires models often; the current
