@@ -29,8 +29,9 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
 - Alpiste/Recorder.swift — SCStream, escreve system.caf e mic.caf separados
 - Alpiste/Notes.swift — mix ffmpeg, whisper, Groq/Gemini, escrita do markdown roteada por extensão
   para `transcricoes/`/`gravacoes/` e `Sync.push` ao concluir; `Tool` e `Env`
-- Alpiste/SyncLogic.swift — lógica pura (Foundation only): roteamento por extensão, vítimas de
-  retenção e se há trabalho pendente pra empurrar (testada por `swiftc` standalone em `Tests/SyncLogicTests.swift`)
+- Alpiste/SyncLogic.swift — lógica pura (Foundation only): roteamento por extensão, onde o
+  `--retranscribe` procura o áudio (`audioFolders`), vítimas de retenção e se há trabalho pendente
+  pra empurrar (testada por `swiftc` standalone em `Tests/SyncLogicTests.swift`)
 - Alpiste/Sync.swift — o lado impuro do git: add/commit/pull --rebase/push do `transcricoes/`, nunca lança
 - Alpiste/Backfill.swift — varredura que regenera resumos que falharam (launch e agendada) e, em todo
   sweep, refaz push pendente e poda gravações com mais de 60 dias
@@ -191,7 +192,11 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
 - `Alpiste --regenerate <file.md>`: re-sumariza um .md já salvo, no lugar, reaproveitando o transcript
   (recuperação para quando o LLM falhou ou a chave não estava configurada na hora da gravação)
 - `Alpiste --retranscribe <file.md>`: joga o transcript fora e transcreve de novo a partir do `.m4a`
-  ao lado, depois re-sumariza. É a recuperação que o `--regenerate` **não** dá, porque ele reaproveita
+  (na irmã `gravacoes/` quando a nota está em `transcricoes/`, senão ao lado da nota; a ordem é
+  `SyncLogic.audioFolders`, pura). **O split de 0.5.13 quebrou esse caminho em silêncio**: até 0.5.16
+  ele só olhava ao lado do `.md` e recusava toda nota sincronizada com "no longer next to", com o
+  `.m4a` a uma pasta de distância; só apareceu em 24/09 ao validar o release. Mudou layout de saída,
+  roda cada CLI de recuperação contra uma nota real antes de fechar. Depois re-sumariza. É a recuperação que o `--regenerate` **não** dá, porque ele reaproveita
   o transcript que encontra: transcript estragado pelo decoder continuaria estragado. Só existe porque
   o `.m4a` nunca foi perdido. Reaproveita o `Notes.mix` com uma fonte só, que é exatamente a conversão
   "áudio entra, wav 16 kHz mono sai" que o whisper quer, e já é exercida pelo `--selftest`

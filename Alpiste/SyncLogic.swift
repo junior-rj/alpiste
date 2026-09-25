@@ -10,6 +10,19 @@ enum SyncLogic {
         name.hasSuffix(".md") ? "transcricoes" : "gravacoes"
     }
 
+    /// Where a note's audio may live, in the order to look. In the split layout the
+    /// note sits in `transcricoes/` and the audio in the sibling `gravacoes/`; the
+    /// note's own folder comes second for the flat legacy layout (`~/MeetingNotes`) and
+    /// for any custom folder. Paths only, no filesystem: `--retranscribe` checks
+    /// existence and stays inside these folders.
+    static func audioFolders(forNoteIn folder: URL) -> [URL] {
+        let folder = folder.standardizedFileURL
+        guard folder.lastPathComponent == "transcricoes" else { return [folder] }
+        let recordings = folder.deletingLastPathComponent()
+            .appendingPathComponent("gravacoes", isDirectory: true).standardizedFileURL
+        return [recordings, folder]
+    }
+
     /// Names of `.m4a` files whose modification date is strictly older than
     /// `now - maxAgeDays`. Non-`.m4a` files are never returned.
     static func retentionVictims(_ files: [(name: String, modified: Date)],

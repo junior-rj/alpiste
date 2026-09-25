@@ -29,6 +29,14 @@ enum SyncLogicTests {
         let victims = SyncLogic.retentionVictims(files, now: now, maxAgeDays: 60)
         expect(victims == ["old.m4a"], "retention picks only old.m4a, got \(victims)")
 
+        // audioFolders: where --retranscribe looks for the note's audio, in order
+        let split = URL(fileURLWithPath: "/r/reunioes/transcricoes", isDirectory: true)
+        expect(SyncLogic.audioFolders(forNoteIn: split).map(\.path) == ["/r/reunioes/gravacoes", "/r/reunioes/transcricoes"],
+               "split layout: sibling gravacoes first, then the note's own folder")
+        let flat = URL(fileURLWithPath: "/Users/x/MeetingNotes", isDirectory: true)
+        expect(SyncLogic.audioFolders(forNoteIn: flat).map(\.path) == ["/Users/x/MeetingNotes"],
+               "flat layout: only the note's own folder")
+
         // hasPending
         expect(SyncLogic.hasPending(porcelain: "", unpushed: 0) == false, "clean -> no pending")
         expect(SyncLogic.hasPending(porcelain: " M transcricoes/x.md\n", unpushed: 0) == true, "dirty -> pending")

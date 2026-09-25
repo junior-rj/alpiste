@@ -963,8 +963,8 @@ enum Notes {
         await Sync.push(reason: file.deletingPathExtension().lastPathComponent)
     }
 
-    /// Re-transcribes a saved note from the audio next to it, then re-summarizes, in
-    /// place. This is the recovery path `--regenerate` cannot provide: regeneration
+    /// Re-transcribes a saved note from its audio (the sibling `gravacoes/` in the split
+    /// layout, or next to the note in the flat one), then re-summarizes, in place. This is the recovery path `--regenerate` cannot provide: regeneration
     /// reuses the transcript it finds, so a transcript the decoder ruined stays ruined.
     /// The `.m4a` is the only thing that was never lost, which is what makes recovery
     /// possible at all. Returns whatever went wrong along the way.
@@ -981,12 +981,22 @@ enum Notes {
         // edited, and following `..` out of the notes folder would transcribe, and send
         // to the LLM, whatever it pointed at.
         let folder = file.standardizedFileURL.deletingLastPathComponent()
-        let audio = folder.appendingPathComponent(name).standardizedFileURL
-        guard isSafeAudioName(name), audio.deletingLastPathComponent() == folder else {
+        guard isSafeAudioName(name) else {
             throw Failure.badResponse("\(file.lastPathComponent) names an audio file outside its folder")
         }
-        guard FileManager.default.fileExists(atPath: audio.path) else {
-            throw Failure.badResponse("\(name) is no longer next to \(file.lastPathComponent)")
+        // Until 0.5.16 this looked next to the note only, which the transcricoes/gravacoes
+        // split had quietly broken: every --retranscribe on a synced note refused with
+        // "no longer next to" while the .m4a sat one folder over (2026-09-24).
+        let folders = SyncLogic.audioFolders(forNoteIn: folder)
+        let located = folders.lazy
+            .map { ($0, $0.appendingPathComponent(name).standardizedFileURL) }
+            .first { candidateFolder, audio in
+                audio.deletingLastPathComponent().path == candidateFolder.path
+                    && FileManager.default.fileExists(atPath: audio.path)
+            }
+        guard let audio = located?.1 else {
+            let looked = folders.map(\.lastPathComponent).joined(separator: " or ")
+            throw Failure.badResponse("\(name) is not in \(looked) beside \(file.lastPathComponent)")
         }
 
         // Scratch lives beside the captures rather than in the system temp dir, for the
