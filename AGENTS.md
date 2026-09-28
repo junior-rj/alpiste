@@ -12,8 +12,7 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
   por minuto); atrás dele a dupla de APIs mantém a ordem por tamanho do transcript, Groq até
   29.000 chars e Gemini acima disso, e o que não lidera fica de reserva. Detalhe e motivo em
   "Regras específicas"
-- Saída num diretório configurável (default: o clone `sparrow_workspace/reunioes`, não mais
-  `~/MeetingNotes`), com `transcricoes/YYYY-MM-DD-HHMM.md` (versionado e empurrado por git) e
+- Saída num diretório configurável (default: o clone `sparrow_workspace/reunioes`), com `transcricoes/YYYY-MM-DD-HHMM.md` (versionado e empurrado por git) e
   `gravacoes/*.m4a` ao lado (gitignored, podado após 60 dias). Detalhe e motivo em "Regras específicas"
 
 ## Contexto
@@ -66,20 +65,13 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
   sem ninguém notar, porque notarização e Gatekeeper aceitam. Desde o 0.5.6 o script copia o
   app para um `mktemp -d` em /tmp, roda `xattr -cr` lá, exige o strict antes do `hdiutil` e
   de novo no app dentro do DMG pronto. Verificar release por `spctl` sozinho não pega isso.
-  **Gerou DMG, instala em /Applications na sequência, sempre.** DMG parado em `build/` não serve
-  de nada: o app da barra de menu continua na versão velha e o que foi testado não é o que roda.
-  Encerrar o Alpiste em execução antes (conferindo que não há gravação em andamento em
-  `~/Library/Application Support/Alpiste/captures/`), substituir o .app e relançar. A permissão
-  de TCC sobrevive porque a identidade Developer ID é a mesma.
-  **Instalar a partir do DMG montado, nunca do `build/export/Alpiste-stapled.app`**: aquele
-  caminho mora dentro do Documents e o iCloud recarimba `com.apple.FinderInfo` nele, então
-  reprova no `codesign --verify --strict` (medido em 02/09) enquanto o app dentro do DMG passa.
-  O DMG é grampeado como imagem, e o app dentro dele não leva ticket próprio: depois do
-  `ditto` rodar `xcrun stapler staple /Applications/Alpiste.app`, senão a instalação regride
-  para verificação online no primeiro launch. Depois: tag `vX.Y.Z` anotada,
-  `git push origin main --follow-tags` e `gh release create vX.Y.Z build/Alpiste-X.Y.Z.dmg`
-  com notas em inglês (abertura, bullets, fechamento "Signed with Developer ID and notarized
-  by Apple. Requires macOS 15+."). Tag sem release no GitHub não serve para quem instala
+  O `release-macos` já instala a partir do DMG montado e re-grampeia o app instalado. Antes de
+  rodar, conferir que não há gravação em andamento em
+  `~/Library/Application Support/Alpiste/captures/`. Nunca instalar a partir de
+  `build/export/Alpiste-stapled.app`: o iCloud recarimba `com.apple.FinderInfo` ali e ele reprova
+  no `codesign --verify --strict`. Notas do release em inglês, fechando com "Signed with Developer
+  ID and notarized by Apple. Requires macOS 15+."; tag sem release no GitHub não serve para quem
+  instala
 
 ## Regras específicas
 - O ScreenCaptureKit NÃO mistura mic com áudio do sistema: chegam em output types e formatos
@@ -91,17 +83,16 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
 - Permissão de Gravação de Tela só vale após relançar o app (o alerta já avisa)
 - SCK não tem modo só-áudio: o filtro de display é obrigatório, daí a superfície de vídeo 2x2 descartada
 - Config em `~/.alpiste/.env` (caminho absoluto fixo, porque o .app não acha um .env relativo ao repo)
-- **O diretório de saída é configurável e o default mudou.** `Notes.outputDirectory` lê a UserDefaults
+- **O diretório de saída é configurável.** `Notes.outputDirectory` lê a UserDefaults
   `OutputDirectory` e cai no default `~/Documents/Desenvolvimentos/sparrow_workspace/reunioes` (o clone
-  do `sparrow-reunioes`), não mais `~/MeetingNotes`. A pasta é escolhida em Preferências ("Meetings
-  folder", `NSOpenPanel` de diretório; `AppState.setOutputDirectory` grava a UserDefaults e espelha).
-  As regras abaixo que citam `~/MeetingNotes` valem para essa pasta configurada
+  do `sparrow-reunioes`). A pasta é escolhida em Preferências ("Meetings
+  folder", `NSOpenPanel` de diretório; `AppState.setOutputDirectory` grava a UserDefaults e espelha)
 - **Split transcrições/gravações.** Dentro do diretório de saída, `.md` vai para `transcricoes/` e
   todo o resto (`.m4a`, `.caf` resgatado) para `gravacoes/`. O roteamento é por extensão em
   `SyncLogic.subfolder(for:)` (pura), e `Notes.destinationURL(for:)` coloca cada artefato na subpasta
   certa; as duas são criadas antes de escrever. `transcricoes/` é versionado e empurrado por git,
   `gravacoes/` é gitignored e descartável (áudio é local). A varredura de resumo pendente do Backfill
-  agora olha `transcricoes/`, não a raiz
+  olha `transcricoes/`
 - **A transcrição é empurrada por git ao concluir a nota.** Depois de escrever o `.md`, `Sync.push`
   faz `git add transcricoes`, commita se houver algo staged (`transcricao: <stem>`), `git pull --rebase`
   e `git push` no repo de saída. É o lado Mac do desenho reuniões-VPS: a VPS Oracle gera a ata a partir
@@ -121,13 +112,12 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
   com mais de 60 dias (`SyncLogic.retentionVictims`), fora do main actor (`Task.detached`), porque roda
   também no launch
 - Falha em qualquer etapa ainda grava o .md e mantém o áudio. Nunca perder a gravação: mix falho
-  resgata os .caf brutos para `~/MeetingNotes`, colisão de nome (mesmo minuto) ganha sufixo `-2`,
+  resgata os .caf brutos para o diretório de saída, colisão de nome (mesmo minuto) ganha sufixo `-2`,
   `-3`..., e falha ao escrever o .md tenta `~/Desktop` como fallback antes de desistir
 - **Quem apaga o `captures/` é o resgate, não o pipeline.** `Notes.rescueRawAudio` devolve
-  `Rescue.complete`, e o `removeItem` do `process` depende dela. Até 0.5.7 a função montava a
-  mensagem só com o que tinha conseguido mover e não contava o resto: move parcial destruía o
-  `mic.caf` em silêncio, e move total falho fazia a nota dizer "raw audio left in captures/…" uma
-  linha antes de apagar exatamente esse diretório. O gatilho mais provável da falha no move é
+  `Rescue.complete`, e o `removeItem` do `process` depende dela: contar só o que foi movido
+  destruiria o `mic.caf` num move parcial, e num move total falho a nota diria "raw audio left
+  in captures/…" uma linha antes de apagar exatamente esse diretório. O gatilho mais provável da falha no move é
   colisão de nome, então o `uniqueStem` sonda `-system.caf` e `-mic.caf` além de `md` e `m4a` (`Notes.artifactNames`). Resgate também escreve a
   linha `Audio:` com o `.caf`, senão o `--retranscribe` recusa justo a gravação que já falhou uma vez
 - Captura que **nunca virou nota** (crash, queda de energia, Forçar Encerramento) é varrida no
@@ -142,9 +132,9 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
 - Quit (Cmd-Q) durante gravação ou processamento é interceptado por `AppDelegate.applicationShouldTerminate`:
   segura o quit (`.terminateLater`), deixa o pipeline salvar, e só então libera a saída
 - **Toda saída terminal do `start()` deve responder ao AppKit**, não só o fim do pipeline. O
-  `start()` também estaciona em `.working("Starting…")`, e até 0.5.7 nenhuma das suas saídas
-  chamava `NSApp.reply`: Cmd-Q ali travava o app para sempre e o `pendingTermination` ligado
-  passava a engolir **todo** alerta pelo resto da sessão. A decisão é `QuitDecision.decide`
+  `start()` também estaciona em `.working("Starting…")`, e saída sem `NSApp.reply` faz o Cmd-Q
+  ali travar o app para sempre, com o `pendingTermination` ligado engolindo **todo** alerta pelo
+  resto da sessão. A decisão é `QuitDecision.decide`
   (pura, `--selftest`), e quit que chega com a gravação já de pé vira `stop()` que salva antes
   de liberar. Diálogo de permissão (mic e tela) chama `NSApp.activate` antes, mesma pegadinha de
   LSUIElement do calendário; e aviso de mic desligado vai **depois** do stream de pé, porque
@@ -175,7 +165,7 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
   microphone" 100 s depois de um wake por tampa aberta, e a tentativa na mão 6 s depois
   funcionou; sem ninguém olhando, a reunião de 46 min não teria sido gravada. Uma tentativa
   extra com 2 s de espera, sem laço. Start que falha depois do stream já ter entregue áudio
-  deixava `system.caf` parcial num diretório órfão em `captures/`; `Recorder.start` agora
+  deixaria `system.caf` parcial num diretório órfão em `captures/`, então `Recorder.start`
   desfaz o diretório antes de relançar o erro
 - **Start que falha tem que chamar `stopCapture()`, e o log diz se o `replayd` obedeceu.** O
   SCK roda a captura dentro do daemon `replayd`; em 27/08 o start falhou porque o mic padrão
@@ -193,10 +183,8 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
   (recuperação para quando o LLM falhou ou a chave não estava configurada na hora da gravação)
 - `Alpiste --retranscribe <file.md>`: joga o transcript fora e transcreve de novo a partir do `.m4a`
   (na irmã `gravacoes/` quando a nota está em `transcricoes/`, senão ao lado da nota; a ordem é
-  `SyncLogic.audioFolders`, pura). **O split de 0.5.13 quebrou esse caminho em silêncio**: até 0.5.16
-  ele só olhava ao lado do `.md` e recusava toda nota sincronizada com "no longer next to", com o
-  `.m4a` a uma pasta de distância; só apareceu em 24/09 ao validar o release. Mudou layout de saída,
-  roda cada CLI de recuperação contra uma nota real antes de fechar. Depois re-sumariza. É a recuperação que o `--regenerate` **não** dá, porque ele reaproveita
+  `SyncLogic.audioFolders`, pura). Mudou o layout de saída: rodar cada CLI de recuperação contra
+  uma nota real antes de fechar. Depois re-sumariza. É a recuperação que o `--regenerate` **não** dá, porque ele reaproveita
   o transcript que encontra: transcript estragado pelo decoder continuaria estragado. Só existe porque
   o `.m4a` nunca foi perdido. Reaproveita o `Notes.mix` com uma fonte só, que é exatamente a conversão
   "áudio entra, wav 16 kHz mono sai" que o whisper quer, e já é exercida pelo `--selftest`
@@ -204,7 +192,7 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
   ajuste fino. `--max-context` no default (`-1`) faz o whisper.cpp injetar o texto já decodificado
   como contexto da janela seguinte: um segmento ruim (queda de nível, vozes sobrepostas) se
   auto-alimenta e o decoder trava repetindo uma frase **até o fim do arquivo**, apagando tudo que
-  vinha depois. Medido em 25/08 sobre o `~/MeetingNotes` inteiro: a reunião de 06/08 (45 min) saiu
+  vinha depois. Medido em 25/08 sobre todas as notas gravadas até então: a reunião de 06/08 (45 min) saiu
   95% `(speaking in foreign language)` e a de 25/08 perdeu os últimos 3 min; com `-mc 0` as duas
   transcreveram inteiras e uma reunião que já estava boa saiu igual. O áudio estava intacto nos dois
   casos, o defeito era só de decodificação
@@ -267,7 +255,7 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
 - O catálogo do Groq muda rápido e a página de marketing atrasa em relação à API (em 19/08 a
   página listava Llama 3.3 70B que a API já não servia): conferir em
   `https://api.groq.com/openai/v1/models` com a chave antes de fixar nome de modelo
-- Recuperação é automática: `Backfill` varre `~/MeetingNotes` atrás de .md dos últimos 7 dias que
+- Recuperação é automática: `Backfill` varre `transcricoes/` do diretório de saída atrás de .md dos últimos 7 dias que
   tenham transcript mas não tenham resumo, e regenera. Roda na abertura do app e em +5/+15/+45 min
   depois de uma gravação que terminou sem resumo; para assim que nada fica pendente. O mesmo sweep
   na mão: `Alpiste --backfill`
@@ -291,9 +279,9 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
   de achar os arquivos: por isso ele é uma constante única compartilhada com o `markdown()`
 - Regenerar reconstrói o arquivo pelo `Notes.compose` a partir do `split()`, que preserva
   título, linha de áudio, transcript e os problemas do blockquote que uma nova sumarização
-  **não** resolve (`Notes.keptProblems`: tudo menos o `summaryFailurePrefix`). Até 0.5.10
-  os avisos sumiam na regeneração, e um backfill que preenchia o resumo apagava "part of the
-  microphone track was lost", devolvendo uma nota que parecia inteira
+  **não** resolve (`Notes.keptProblems`: tudo menos o `summaryFailurePrefix`). Sem isso um
+  backfill que preenche o resumo apagaria "part of the microphone track was lost", devolvendo
+  uma nota que parece inteira
 - A saída do LLM passa por `Notes.sanitizeNotes` (pura, `--selftest`) antes de entrar na nota:
   o resumo é texto não confiável guiado pelo que foi dito na reunião, e `split`,
   `pendingSummary` e `audioFileName` casam marcadores literais. Divisor forjado devolvia
@@ -302,8 +290,8 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
   para outro arquivo. Título de calendário passa por `Notes.safeTitle` pelo mesmo motivo
   (vem de qualquer convite recebido, e `\n` injetava linhas antes da `Audio:` real)
 - O `--retranscribe` exige que a linha `Audio:` seja um **nome**, não um caminho
-  (`Notes.isSafeAudioName`): `appendingPathComponent` segue `..` para fora de
-  `~/MeetingNotes`, e o resultado da transcrição iria para o LLM
+  (`Notes.isSafeAudioName`): `appendingPathComponent` segue `..` para fora do
+  diretório de saída, e o resultado da transcrição iria para o LLM
 - O `SleepGuard` tem dono: `hold` devolve um token e `release(token)` ignora token que não
   seja o do dono atual. Sem isso o pipeline da gravação anterior, acordando depois do alerta
   modal "Saved with warnings", soltava o assertion que a gravação seguinte tinha acabado de
@@ -332,7 +320,7 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
   uma `View`, não no builder de `Scene`). Como `LSUIElement`, chamar `NSApp.activate` antes de
   `openSettings()`, senão a janela abre atrás. **Nunca `NSWindow` própria com controle interativo:
   crasha por recursão de constraints em app de barra de menu** (erros.md 2026-08-17). Os toggles e a
-  afordância de calendário moram aqui, não mais no menu
+  afordância de calendário moram aqui
 - **Launch at login** é `SMAppService.mainApp` (macOS 13+; sem entitlement em app Developer ID sem
   sandbox). A fonte de verdade é o `status` do serviço, não `UserDefaults` (o usuário pode mudar em
   Ajustes do Sistema): `AppState.launchAtLoginEnabled` espelha `.enabled || .requiresApproval` e é
@@ -423,5 +411,5 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
 - `--regenerate` e `--retranscribe` aceitam qualquer caminho de `.md`: é CLI do próprio usuário
 - Troca de formato do mic no meio da gravação (AirPods) continua contada e reportada como
   faixa incompleta, não recuperada
-- `~/MeetingNotes` fica com o umask do usuário (é pasta dele); `captures/` e `Logs/Alpiste`
+- O diretório de saída fica com o umask do usuário (é pasta dele); `captures/` e `Logs/Alpiste`
   são criados em 700
