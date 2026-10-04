@@ -1,6 +1,6 @@
 name: Alpiste
 options:
-  bundleIdPrefix: com.sparrow
+  bundleIdPrefix: br.tec.sparrow
   deploymentTarget:
     # 15.0 is the floor for SCStreamConfiguration.captureMicrophone
     macOS: "15.0"
@@ -13,7 +13,7 @@ settings:
     SWIFT_VERSION: "6.0"
     SWIFT_STRICT_CONCURRENCY: complete
     SWIFT_TREAT_WARNINGS_AS_ERRORS: "YES"
-    MARKETING_VERSION: "0.5.17"
+    MARKETING_VERSION: "1.5.17"
     CURRENT_PROJECT_VERSION: "24"
     DEVELOPMENT_TEAM: "Q9KN4S5XHY"
 
@@ -27,7 +27,7 @@ targets:
           - "**/.DS_Store"
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.sparrow.alpiste
+        PRODUCT_BUNDLE_IDENTIFIER: br.tec.sparrow.alpiste
         GENERATE_INFOPLIST_FILE: true
         # ponytail: sem sandbox = uso proprio via Developer ID, precisa shell out pra ffmpeg/whisper-cli
         ENABLE_APP_SANDBOX: "NO"

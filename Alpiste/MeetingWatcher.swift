@@ -50,7 +50,7 @@ enum MeetingWatcher {
     /// preference, it is a bug that shows up as a prompt every few minutes.
     static let alwaysIgnoredApps = [
         "com.electron.wispr-flow",
-        "com.sparrow.alpiste",
+        "br.tec.sparrow.alpiste",
     ]
 
     /// Pure. Covered by `--selftest`.

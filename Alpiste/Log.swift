@@ -28,7 +28,7 @@ enum Log {
     /// Writes are serialized: the recording pipeline and a backfill sweep can be logging
     /// at the same moment, and interleaved halves of two lines would be worse than
     /// either line alone.
-    private static let queue = DispatchQueue(label: "com.sparrow.alpiste.log")
+    private static let queue = DispatchQueue(label: "br.tec.sparrow.alpiste.log")
 
     private static let timestamp: DateFormatter = {
         let formatter = DateFormatter()

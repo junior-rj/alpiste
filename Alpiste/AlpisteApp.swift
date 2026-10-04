@@ -986,7 +986,7 @@ enum SelfTest {
         // The two that make the feature usable instead of a prompt every few minutes.
         expect(MeetingWatcher.classify(bundleID: "com.electron.wispr-flow") == .ignored,
                "classify: Wispr Flow dictation never counts as a meeting")
-        expect(MeetingWatcher.classify(bundleID: "com.sparrow.alpiste") == .ignored,
+        expect(MeetingWatcher.classify(bundleID: "br.tec.sparrow.alpiste") == .ignored,
                "classify: Alpiste's own capture never counts as a meeting")
         // Pinned to the real identifier rather than to a literal: renaming
         // PRODUCT_BUNDLE_IDENTIFIER would otherwise leave the line above passing while the

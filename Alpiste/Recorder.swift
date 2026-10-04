@@ -160,7 +160,7 @@ enum Recorder {
         let tap = AudioTap(directory: directory, onStop: onStreamError)
         let stream = SCStream(filter: filter, configuration: config, delegate: tap)
 
-        let queue = DispatchQueue(label: "com.sparrow.alpiste.audio")
+        let queue = DispatchQueue(label: "br.tec.sparrow.alpiste.audio")
         do {
             try stream.addStreamOutput(tap, type: .screen, sampleHandlerQueue: queue)
             try stream.addStreamOutput(tap, type: .audio, sampleHandlerQueue: queue)
