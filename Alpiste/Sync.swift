@@ -60,7 +60,8 @@ enum Sync {
                 Log.write("sync FAILED (\(reason)): git commit"); return
             }
         }
-        guard await run(["pull", "--rebase"], repo: repo, label: "git-pull") == 0 else {
+        // --autostash: an unrelated dirty file in the repo (e.g. AGENTS.md) must not block the sync.
+        guard await run(["pull", "--rebase", "--autostash"], repo: repo, label: "git-pull") == 0 else {
             Log.write("sync FAILED (\(reason)): git pull --rebase"); return
         }
         guard await run(["push"], repo: repo, label: "git-push") == 0 else {
