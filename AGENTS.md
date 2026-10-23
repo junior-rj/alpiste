@@ -94,7 +94,7 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
   `gravacoes/` é gitignored e descartável (áudio é local). A varredura de resumo pendente do Backfill
   olha `transcricoes/`
 - **A transcrição é empurrada por git ao concluir a nota.** Depois de escrever o `.md`, `Sync.push`
-  faz `git add transcricoes`, commita se houver algo staged (`transcricao: <stem>`), `git pull --rebase`
+  faz `git add transcricoes`, commita se houver algo staged (`transcricao: <stem>`), `git pull --rebase --autostash`
   e `git push` no repo de saída. É o lado Mac do desenho reuniões-VPS: a VPS Oracle gera a ata a partir
   da transcrição empurrada. **Nunca lança**: falha de sync não pode perder a nota já gravada, é só logada
   e o Backfill retenta. Também roda após `--regenerate` e `--retranscribe`. **Não** roda quando a nota
