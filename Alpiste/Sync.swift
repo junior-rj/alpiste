@@ -43,7 +43,9 @@ enum Sync {
         let deadline = Date().addingTimeInterval(timeout)
         while p.isRunning && Date() < deadline { try? await Task.sleep(nanoseconds: 200_000_000) }
         if p.isRunning { p.terminate(); Log.write("git \(label) timed out"); return -1 }
-        p.waitUntilExit()
+        // No waitUntilExit here: the poll above already saw the exit, and waitUntilExit
+        // spins the calling thread's run loop, which on a cooperative-pool thread can
+        // miss the termination and block forever (hung the pipeline after a good push).
         return p.terminationStatus
     }
 
@@ -90,7 +92,8 @@ enum Sync {
         p.standardError = Pipe()
         do { try p.run() } catch { return "" }
         let data = out.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
+        // Polled, not waitUntilExit: same run-loop hang as in run(_:repo:label:).
+        while p.isRunning { usleep(20_000) }
         return String(data: data, encoding: .utf8) ?? ""
     }
 }
