@@ -332,24 +332,23 @@ final class AppState {
     /// revoked, sleep/wake). Save whatever was captured instead of leaving the UI stuck
     /// on "Recording" with nothing further ever being written.
     ///
-    /// `stop()` goes before the alert on purpose: `alert` is modal and blocks until
-    /// dismissed. With the order reversed, the two lid-close cases of 2026-08-26/27 sat
-    /// with the capture unprocessed until the lid opened and OK was clicked (47 min the
-    /// first time), and a shutdown in between would have left it stranded in captures/.
+    /// No alert here: `stop()` hands the interruption to the pipeline, which reports it
+    /// once the note is written. `alert` is modal, and the pipeline task inherits the main
+    /// actor, whose jobs do not run while `runModal()` spins. Calling `stop()` first and
+    /// alerting right after (0.5.5) still held the save until OK was clicked: on 2026-10-27
+    /// the `stopCapture` left 31 min after the lid closed, 8 ms after the alert went away.
     private func streamFailed(_ error: Error) {
         // A user-initiated stop already tore this down. There is no window between the
         // session being assigned and the phase becoming `.recording`: `start()` does both
         // without suspending, so a session with no recording cannot be observed here.
         guard session != nil, isRecording else { return }
         Log.write("capture stream stopped on its own — \(error.localizedDescription)")
-        stop()
-        alert("Recording interrupted",
-              "The capture stream stopped (\(error.localizedDescription)). "
-                + "What was recorded up to that point is being saved. "
-                + "Closing the lid mid-recording is the usual cause.")
+        stop(interruption: "The capture stream stopped (\(error.localizedDescription)) "
+                + "before the recording was stopped; the note covers what was recorded "
+                + "up to that point. Closing the lid mid-recording is the usual cause.")
     }
 
-    func stop() {
+    func stop(interruption: String? = nil) {
         guard let session, let startedAt else {
             // Nothing to save. A quit waiting on this would otherwise wait forever. The
             // hold stays if a start is in flight: that one owns it and will settle it.
@@ -392,14 +391,16 @@ final class AppState {
                 let unrecoverable = Notes.problemsWorthAlerting(result.problems,
                                                                summaryPending: summaryPending)
                 phase = summaryPending && unrecoverable.isEmpty ? .retrying(file) : .done(file)
-                if !unrecoverable.isEmpty {
-                    alert("Saved with warnings",
+                let warnings = (interruption.map { [$0] } ?? []) + unrecoverable
+                if !warnings.isEmpty {
+                    alert(interruption == nil ? "Saved with warnings" : "Recording interrupted",
                           "\(file.lastPathComponent) was written, but:\n\n"
-                            + unrecoverable.map { "• \($0)" }.joined(separator: "\n")
+                            + warnings.map { "• \($0)" }.joined(separator: "\n")
                             + "\n\nDetails in \(Log.file.path)")
                 }
             } else {
-                let message = result.problems.joined(separator: "\n")
+                let message = ((interruption.map { [$0] } ?? []) + result.problems)
+                    .joined(separator: "\n")
                 phase = .failed(message)
                 alert("Could not save notes", message + "\n\nDetails in \(Log.file.path)")
             }

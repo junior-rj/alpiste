@@ -160,9 +160,11 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
 - Stream do SCK que morre sozinho no meio da reunião (display desconectado, sleep/wake) é reportado
   via callback e salva o que foi capturado até ali, em vez de deixar a UI travada em "Recording".
   A causa comum é **tampa fechada no fim da reunião**: "Failed to find any displays or windows to
-  capture" no log bate ao segundo com `Display is turned off` no `pmset -g log` (26 e 27/08). Em
-  `streamFailed` o `stop()` vem **antes** do alerta, porque o alerta é modal e segura tudo até o
-  OK: com a ordem invertida a captura ficou 47 min parada em `captures/` esperando a tampa abrir
+  capture" no log bate ao segundo com `Display is turned off` no `pmset -g log` (26 e 27/08). O
+  `streamFailed` **não abre alerta**: passa a interrupção para `stop(interruption:)`, e o aviso sai
+  só quando a nota já foi escrita. O alerta é modal, e o pipeline é um `Task` no main actor, que não
+  roda enquanto o `runModal()` gira. Chamar `stop()` antes do alerta (0.5.5) não bastava: em 27/10
+  o `stopCapture` só saiu 31 min depois da tampa, 8 ms depois de o OK ser clicado
 - O start da gravação **tenta duas vezes**. Em 27/08 o SCK lançou "Stream failed to start
   microphone" 100 s depois de um wake por tampa aberta, e a tentativa na mão 6 s depois
   funcionou; sem ninguém olhando, a reunião de 46 min não teria sido gravada. Uma tentativa
