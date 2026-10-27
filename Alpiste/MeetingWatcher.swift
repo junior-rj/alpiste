@@ -228,6 +228,37 @@ enum MeetingWatcher {
         return now.timeIntervalSince(startedAt) >= maximum
     }
 
+    /// Pure: whether a recording that is already running belongs under the watcher's
+    /// auto-stop. Covered by `--selftest`.
+    ///
+    /// A recording started from the menu while a call holds the microphone is that
+    /// call, so it gets the same idle stop as one the panel started. Without this, the
+    /// meeting recorded by hand on 2026-10-26 had no way to end except another click.
+    static func adoptsRecording(startedByWatcher: Bool, micActiveSince: Date?) -> Bool {
+        !startedByWatcher && micActiveSince != nil
+    }
+
+    /// What happens when a call is detected, from `MEETING_AUTO_RECORD` in the `.env`.
+    enum AutoRecord: Equatable {
+        /// Ask, and a panel left unanswered counts as Not now. The default.
+        case ask
+        /// Ask, but a panel left unanswered records: missing the panel during a call
+        /// costs the meeting, while an unwanted recording costs one click on Stop.
+        case onTimeout
+        /// Record without asking.
+        case always
+    }
+
+    /// Pure. Covered by `--selftest`. Anything unrecognised keeps the default, so a typo
+    /// in the `.env` never starts recording calls the user did not ask for.
+    static func autoRecord(_ value: String?) -> AutoRecord {
+        switch value?.trimmingCharacters(in: .whitespaces).lowercased() {
+        case "timeout": .onTimeout
+        case "always": .always
+        default: .ask
+        }
+    }
+
     private static func propertyAddress(
         _ selector: AudioObjectPropertySelector
     ) -> AudioObjectPropertyAddress {
@@ -279,9 +310,6 @@ enum MeetingMonitor {
 
     private static var micActiveSince: Date?
     private static var lastMicActivity: Date?
-    /// A recording the watcher started has to end even if the microphone never goes
-    /// quiet, because the overrun extension on its own never stops giving out blocks.
-    private static let maxRecording: TimeInterval = 4 * 3600
 
     private static var ticker: Timer?
     /// Which microphone session has already been answered, by its start time, rather than
@@ -289,7 +317,6 @@ enum MeetingMonitor {
     private static var offeredSession: Date?
     private static var startedByWatcher = false
     private static var autoStopAt: Date?
-    private static var recordingStartedAt: Date?
 
     static func start() {
         guard ticker == nil else { return }
@@ -358,6 +385,13 @@ enum MeetingMonitor {
             // be offered again once this recording ends. Without this the panel came back
             // for the very call the user had just stopped recording by hand.
             offeredSession = micActiveSince
+            if MeetingWatcher.adoptsRecording(startedByWatcher: startedByWatcher,
+                                              micActiveSince: micActiveSince) {
+                startedByWatcher = true
+                autoStopAt = nil
+                Log.write("meeting watcher: a recording started by hand has a call on the "
+                            + "microphone, will stop once the microphone goes idle")
+            }
             if startedByWatcher { considerAutoStop(now: now, idleFor: idleFor) }
             return
         }
@@ -392,23 +426,35 @@ enum MeetingMonitor {
             }
             // The title is meeting content and never reaches the log; whether one was
             // matched is a decision, and that does.
-            Log.write("meeting watcher: prompting (calendar event "
-                        + (event == nil ? "not matched)" : "matched)"))
+            let mode = MeetingWatcher.autoRecord(Settings.env()["MEETING_AUTO_RECORD"])
+            let matched = event == nil ? "not matched)" : "matched)"
+            if mode == .always {
+                Log.write("meeting watcher: recording without asking (calendar event " + matched)
+                accept(event: event, now: Date())
+                return
+            }
+            Log.write("meeting watcher: prompting (calendar event " + matched)
 
-            MeetingPrompt.show(subtitle: event?.title) {
+            MeetingPrompt.show(subtitle: event?.title, recordsOnTimeout: mode == .onTimeout) {
                 // Date() rather than the captured `now`: the panel may have sat on screen
                 // for a minute and a half, and the auto-stop floor is measured from the
                 // recording.
                 accept(event: event, now: Date())
             } onDecline: {
                 Log.write("meeting watcher: declined, staying quiet until this call ends")
+            } onTimeout: {
+                if mode == .onTimeout {
+                    Log.write("meeting prompt: timed out, recording")
+                    accept(event: event, now: Date())
+                } else {
+                    Log.write("meeting prompt: timed out, treating it as Not now")
+                }
             }
         }
     }
 
     private static func accept(event: MeetingWatcher.CalendarEvent?, now: Date) {
         startedByWatcher = true
-        recordingStartedAt = now
         if let event {
             let stopAt = MeetingWatcher.autoStopDate(eventEnd: event.end,
                                                     startedAt: now,
@@ -425,15 +471,9 @@ enum MeetingMonitor {
     }
 
     private static func considerAutoStop(now: Date, idleFor: TimeInterval) {
-        // Before anything else: the extension below hands out blocks for as long as the
-        // microphone is live, and a meeting tab nobody closed keeps it live indefinitely.
-        if MeetingWatcher.exceededMaximum(startedAt: recordingStartedAt, now: now,
-                                          maximum: maxRecording) {
-            Log.write("meeting watcher: recording reached the "
-                        + "\(Int(maxRecording / 3600))h ceiling, stopping")
-            finish()
-            return
-        }
+        // The extension below hands out blocks for as long as the microphone is live, and
+        // a meeting tab nobody closed keeps it live indefinitely: `AppState` holds the
+        // ceiling that ends that, for every recording.
         let idleLimit = autoStopAt == nil ? idleStopWithoutEvent : idleStopWithEvent
         if idleFor >= idleLimit {
             Log.write("meeting watcher: microphone idle for "
@@ -465,7 +505,6 @@ enum MeetingMonitor {
     private static func clearRecordingState() {
         startedByWatcher = false
         autoStopAt = nil
-        recordingStartedAt = nil
     }
 
     /// Tunables, read from `~/.alpiste/.env` at each use so a change takes effect without a

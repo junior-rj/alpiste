@@ -795,6 +795,13 @@ enum Notes {
     /// plausibly, and only the lost half of the meeting was missing. `-mc 0` is the
     /// fix; this is the alarm for when it happens anyway.
     ///
+    /// A line that is only a bracketed annotation (`[silêncio]`, `[barulho do computador]`)
+    /// is whisper describing a room with nobody speaking, and it neither counts toward a
+    /// run nor continues one. On 2026-10-26 the minutes after a call ended produced 14 of
+    /// them in a row, and the note warned that speech was missing when none was. The
+    /// bracketed loop that did hide speech (644 lines of `[multidão conversando]`) only
+    /// happened without `-mc 0`, which is now always passed.
+    ///
     /// The message deliberately never quotes the repeated line: problems are echoed to
     /// the log, and meeting content must never land there. Covered by `--selftest`.
     static func runawayRepetition(_ transcript: String) -> String? {
@@ -804,6 +811,11 @@ enum Notes {
         for line in transcript.split(separator: "\n", omittingEmptySubsequences: false) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty { continue }
+            if trimmed.hasPrefix("["), trimmed.hasSuffix("]") {
+                run = 0
+                previous = nil
+                continue
+            }
             if trimmed[...] == previous {
                 run += 1
             } else {

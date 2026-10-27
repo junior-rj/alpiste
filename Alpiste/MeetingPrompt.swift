@@ -11,7 +11,8 @@ import SwiftUI
 @MainActor
 enum MeetingPrompt {
     /// Long enough to notice after settling into a call, short enough that a stale panel
-    /// is not still sitting there an hour later. Timing out counts as "Not now".
+    /// is not still sitting there an hour later. What timing out means is the caller's
+    /// call (`MEETING_AUTO_RECORD`): Not now by default, Record when asked to.
     static let timeout: TimeInterval = 90
 
     private static var panel: NSPanel?
@@ -19,12 +20,15 @@ enum MeetingPrompt {
 
     /// Replaces any panel already on screen, so a second detection cannot stack two.
     static func show(subtitle: String?,
+                     recordsOnTimeout: Bool = false,
                      onAccept: @escaping @MainActor () -> Void,
-                     onDecline: @escaping @MainActor () -> Void) {
+                     onDecline: @escaping @MainActor () -> Void,
+                     onTimeout: @escaping @MainActor () -> Void) {
         dismiss()
 
         let content = PromptView(
             subtitle: subtitle,
+            recordsOnTimeout: recordsOnTimeout,
             accept: { dismiss(); onAccept() },
             decline: { dismiss(); onDecline() })
 
@@ -63,9 +67,8 @@ enum MeetingPrompt {
         timeoutTask = Task {
             try? await Task.sleep(for: .seconds(timeout))
             guard !Task.isCancelled, Self.panel != nil else { return }
-            Log.write("meeting prompt: timed out, treating it as Not now")
             dismiss()
-            onDecline()
+            onTimeout()
         }
     }
 
@@ -104,6 +107,7 @@ enum MeetingPrompt {
 
 private struct PromptView: View {
     let subtitle: String?
+    let recordsOnTimeout: Bool
     let accept: @MainActor () -> Void
     let decline: @MainActor () -> Void
 
@@ -137,9 +141,9 @@ private struct PromptView: View {
                 }
             }
 
-            // Makes the 90s auto-dismiss visible instead of a surprise. Timing out counts
-            // as "Not now", so the bar depleting to nothing reads as exactly that.
-            TimeoutBar(duration: MeetingPrompt.timeout)
+            // Makes the 90s timeout visible instead of a surprise, and says which way it
+            // goes, since it can mean either button.
+            TimeoutBar(duration: MeetingPrompt.timeout, recordsOnTimeout: recordsOnTimeout)
 
             HStack(spacing: 8) {
                 Spacer()
@@ -168,12 +172,13 @@ private struct PromptView: View {
 /// back to a static caption rather than an animating bar.
 private struct TimeoutBar: View {
     let duration: TimeInterval
+    let recordsOnTimeout: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var depleted = false
 
     var body: some View {
         if reduceMotion {
-            Text("Dismisses on its own")
+            Text(recordsOnTimeout ? "Records on its own" : "Dismisses on its own")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         } else {
@@ -187,7 +192,8 @@ private struct TimeoutBar: View {
             // VoiceOver can't perceive the depleting bar, so give it the same sentence the
             // Reduce Motion branch shows, otherwise the panel would vanish without warning.
             .accessibilityElement()
-            .accessibilityLabel("Dismisses on its own if you don't choose")
+            .accessibilityLabel(recordsOnTimeout ? "Starts recording on its own if you don't choose"
+                                                 : "Dismisses on its own if you don't choose")
             .onAppear {
                 withAnimation(.linear(duration: duration)) { depleted = true }
             }

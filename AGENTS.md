@@ -104,7 +104,9 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
   `GIT_TERMINAL_PROMPT=0` (git travado nunca pede senha e penduraria o app). O git é achado por sondagem
   dos caminhos do brew/sistema, mesma pegadinha do ffmpeg (o `.app` aberto pelo Finder não herda o PATH).
   A saída de cada subcomando vai pra um log em `supportDirectory`, nunca por pipe (deadlock de buffer),
-  com timeout de 120s
+  com timeout de 120s. **Nunca `waitUntilExit()`** dentro de código `async`: depois do polling de
+  `isRunning`, ele girava o run loop de uma thread do pool cooperativo e não voltava mais, e o
+  pipeline travou com o push já feito (23/10/2026, corrigido na 1.5.19)
 - **O Backfill refaz push pendente e poda gravações antigas em TODO sweep**, antes do guard de resumo
   pendente, porque árvore limpa ainda pode ter commit esperando push ou gravação vencida, e `--backfill`
   tem que checar as duas sempre. `retryPendingSync` empurra de novo quando `SyncLogic.hasPending` (commit
@@ -196,6 +198,12 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
   95% `(speaking in foreign language)` e a de 25/08 perdeu os últimos 3 min; com `-mc 0` as duas
   transcreveram inteiras e uma reunião que já estava boa saiu igual. O áudio estava intacto nos dois
   casos, o defeito era só de decodificação
+- Linha que é só anotação entre colchetes (`[silêncio]`, `[barulho do computador]`) **não conta**
+  no `runawayRepetition` e quebra a sequência: é o whisper descrevendo sala vazia depois que a call
+  acaba. Em 26/10 isso deu 14 repetições, o aviso "speech is probably missing" e o modal "Saved with
+  warnings" sem fala nenhuma perdida. Parênteses continuam contando (o `(speaking in foreign
+  language)` de 06/08 foi perda real). O loop de colchetes que escondeu fala (`[multidão conversando]`)
+  só acontecia sem o `-mc 0`
 - `-l auto` é a segunda metade do mesmo estrago e **não** se resolve sozinha: a detecção olha só os
   primeiros 30 segundos e aplica o palpite ao arquivo todo, então abertura ruidosa traduziu uma
   reunião inteira em português para o inglês. Fixar só o idioma sem o `-mc 0` apenas traduz a
@@ -350,7 +358,14 @@ App macOS nativo de notas de reunião com IA, no estilo do Granola: captura o á
   evento casado o ocioso vira 15 min, generoso de propósito para que um trecho longo no mudo
   nunca corte reunião viva. `Stop Recording` na mão sempre vence. A prorrogação tem **teto de 4h**
   (`MeetingWatcher.exceededMaximum`): aba de reunião esquecida segura o mic para sempre, e captura
-  de 6h estoura o timeout de 4h do próprio whisper
+  de 6h estoura o timeout de 4h do próprio whisper. **O teto mora no ticker do `AppState`, não no
+  watcher**, e vale para toda gravação: gravação iniciada pelo menu não tinha fim nenhum, e a de
+  05/10 rodou 6,6 h até o Mac ser desligado com a captura aberta
+- Gravação iniciada **à mão** com app de reunião no mic é **adotada** pelo watcher
+  (`MeetingWatcher.adoptsRecording`, `--selftest`) e ganha a parada por mic ocioso de 5 min
+- `MEETING_AUTO_RECORD` no `.env` (`MeetingWatcher.autoRecord`, `--selftest`): `ask` (default,
+  painel sem resposta em 90 s é Not now), `timeout` (painel sem resposta grava) e `always` (grava
+  sem painel). Valor desconhecido cai no `ask`: erro de digitação nunca liga gravação sozinho
 - **`offered` é identidade de sessão de microfone, não booleano** (`MeetingWatcher.alreadyOffered`,
   pura, `--selftest`), e a contabilidade da sessão roda **acima** de todo return antecipado do tick.
   Com um booleano abaixo do `guard !isBusy`, a reunião que começava enquanto o whisper ainda

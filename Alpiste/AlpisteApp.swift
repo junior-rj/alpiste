@@ -229,6 +229,10 @@ final class AppState {
     private var startedAt: Date?
     private var ticker: Timer?
 
+    /// A forgotten meeting tab, or a recording started by hand and never stopped, would
+    /// otherwise outrun whisper's own four-hour ceiling and produce no transcript at all.
+    static let maximumRecording: TimeInterval = 4 * 3600
+
     var isRecording: Bool { if case .recording = phase { true } else { false } }
     var isBusy: Bool { if case .working = phase { true } else { false } }
 
@@ -583,8 +587,19 @@ final class AppState {
         let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                let seconds = max(0, Int(Date().timeIntervalSince(start)))
+                let now = Date()
+                let seconds = max(0, Int(now.timeIntervalSince(start)))
                 self.elapsed = String(format: "%d:%02d", seconds / 60, seconds % 60)
+                // Here and not in the meeting watcher, so it binds every recording: one
+                // started from the menu used to have no end at all, and on 2026-10-05 it
+                // ran 6.6 h until the Mac was shut down with the capture still open.
+                if self.isRecording,
+                   MeetingWatcher.exceededMaximum(startedAt: start, now: now,
+                                                  maximum: Self.maximumRecording) {
+                    Log.write("recording reached the "
+                                + "\(Int(Self.maximumRecording / 3600))h ceiling, stopping")
+                    self.stop()
+                }
             }
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -676,6 +691,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             exit(0)
         } onDecline: {
             print("ok   Not now")
+            Log.flush()
+            exit(0)
+        } onTimeout: {
+            print("ok   timed out")
             Log.flush()
             exit(0)
         }
@@ -844,6 +863,15 @@ enum SelfTest {
         let alternating = Array(repeating: "yes\nno", count: 40).joined(separator: "\n")
         expect(Notes.runawayRepetition(alternating) == nil,
                "runawayRepetition: only consecutive repeats count")
+        // A silent room after the call ended: whisper annotates it, nothing was lost.
+        expect(Notes.runawayRepetition(repeated("[silêncio]", 40)) == nil,
+               "runawayRepetition: bracketed non-speech annotations are not a loop")
+        expect(Notes.runawayRepetition(
+                   repeated("stuck phrase", 6) + "\n[silêncio]\n" + repeated("stuck phrase", 6))
+                == nil,
+               "runawayRepetition: an annotation breaks the run instead of extending it")
+        expect(Notes.runawayRepetition(repeated("(speaking in foreign language)", 40)) != nil,
+               "runawayRepetition: parenthesised hallucinations still count")
         // Problems are echoed to the log, where meeting content must never appear.
         expect(Notes.runawayRepetition(repeated("secret meeting words", 40))?
                 .contains("secret") == false,
@@ -1181,7 +1209,22 @@ enum SelfTest {
                                               maximum: 4 * 3600),
                "exceededMaximum: the ceiling stops a recording nothing else would")
         expect(!MeetingWatcher.exceededMaximum(startedAt: nil, now: joined, maximum: 1),
-               "exceededMaximum: a recording the watcher did not start has no ceiling")
+               "exceededMaximum: no start time, nothing to measure")
+
+        // The call recorded by hand on 2026-10-26 had no way to stop on its own.
+        expect(MeetingWatcher.adoptsRecording(startedByWatcher: false, micActiveSince: joined),
+               "adoptsRecording: a recording started by hand during a call gets the idle stop")
+        expect(!MeetingWatcher.adoptsRecording(startedByWatcher: false, micActiveSince: nil),
+               "adoptsRecording: with no call on the microphone it is left alone")
+        expect(!MeetingWatcher.adoptsRecording(startedByWatcher: true, micActiveSince: joined),
+               "adoptsRecording: the watcher's own recording is already under it")
+
+        expect(MeetingWatcher.autoRecord(nil) == .ask, "autoRecord: asks by default")
+        expect(MeetingWatcher.autoRecord(" Timeout ") == .onTimeout,
+               "autoRecord: timeout, case and spaces ignored")
+        expect(MeetingWatcher.autoRecord("always") == .always, "autoRecord: always")
+        expect(MeetingWatcher.autoRecord("alwyas") == .ask,
+               "autoRecord: a typo never starts recording calls")
 
         // The rescue is the last line before a recording is gone for good, and what it
         // could *not* move is the half that matters: reporting only the successes let the

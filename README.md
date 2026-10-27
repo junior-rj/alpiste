@@ -41,6 +41,8 @@ multi-hour meeting survives disk pressure.
 Off by default. Turn on **Auto-start on meetings** in Settings (⌘, from the menu bar icon)
 and Alpiste offers to record when it notices you have joined a call: a small floating panel
 with **Record** and **Not now**, which times out after 90 seconds and never steals focus.
+By default an unanswered panel counts as Not now; `MEETING_AUTO_RECORD=timeout` makes it
+record instead, and `MEETING_AUTO_RECORD=always` records without showing the panel.
 
 The trigger is audio, not the calendar. CoreAudio reports which processes hold the
 microphone, so an event you never joined stays quiet and an unscheduled call is still
@@ -58,8 +60,11 @@ appears, its title becomes the note's heading and its end time schedules the sto
 one, the recording stops five minutes after the last meeting app lets go of the
 microphone; with one, the idle allowance grows to fifteen minutes so a long stretch on mute
 never cuts a live meeting. A meeting that runs past its scheduled end is extended in
-ten-minute blocks rather than being cut off, up to a four-hour ceiling for a meeting tab
-nobody closed, and **Stop Recording** always wins.
+ten-minute blocks rather than being cut off, and **Stop Recording** always wins.
+
+A recording started by hand from the menu while a meeting app holds the microphone gets the
+same idle stop. Every recording, however it started, stops at a four-hour ceiling: a meeting
+tab nobody closed or a recording nobody stopped would otherwise outrun whisper's own limit.
 
 Calendar access is requested the first time you switch the feature on, never at launch.
 Going without it costs you the title and the scheduled stop; everything else still works.
@@ -145,6 +150,7 @@ GROQ_API_KEY=...
 # MEETING_DEBOUNCE_SECONDS=     # defaults to 20
 # MEETING_STOP_GRACE_MINUTES=   # defaults to 5
 # MEETING_OVERRUN_MINUTES=      # defaults to 10
+# MEETING_AUTO_RECORD=          # ask (default), timeout (record when the panel times out), always
 
 # Language whisper is pinned to, defaults to pt. Deliberately not "auto": whisper decides
 # from the first 30 seconds alone and applies that guess to the whole file.
